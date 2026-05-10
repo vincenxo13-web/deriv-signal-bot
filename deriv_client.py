@@ -4,13 +4,13 @@ Deriv WebSocket client: connect, subscribe to ticks, optional authorize, reconne
 Official endpoint pattern:
   wss://ws.binaryws.com/websockets/v3?app_id=APP_ID
 
-Tick subscription pattern (market data — no auth required for many symbols):
+Tick subscription pattern:
   {"ticks": "BOOM500", "subscribe": 1, "req_id": 2}
 
 Ping keep-alive:
   {"ping": 1}
 
-This module also contains **stub** helpers for proposal / buy / sell. Those calls are
+This module also contains stub helpers for proposal / buy / sell. Those calls are
 hard-blocked unless `execution_allowed()` in config.py returns True.
 """
 
@@ -23,11 +23,10 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 try:
-    # websockets 14+ — explicit import surfaces a broken install (missing asyncio/) early
     from websockets.asyncio.client import connect as ws_connect
-except ModuleNotFoundError as exc:  # pragma: no cover - env-specific
+except ModuleNotFoundError as exc:
     raise RuntimeError(
-        "The installed 'websockets' package is incomplete (missing 'websockets.asyncio'). "
+        "The installed 'websockets' package is incomplete. "
         "Fix: python -m pip uninstall -y websockets && "
         "python -m pip install --no-cache-dir 'websockets>=15.0.1,<16'"
     ) from exc
@@ -62,21 +61,25 @@ class DerivWebSocketClient:
 
     async def _maybe_authorize(self, ws: Any) -> None:
         token = self.settings.deriv_api_token
+
         if not token:
             logger.info("No DERIV_API_TOKEN set — skipping authorize (ticks may still stream).")
             return
+
         req_id = self._next_req_id()
         await self._send_json(ws, {"authorize": token, "req_id": req_id})
-        # Read one authorize response (Deriv may send other messages — drain lightly)
+
         for _ in range(5):
             raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
             data = json.loads(raw)
+
             if data.get("msg_type") == "authorize":
                 if data.get("error"):
                     logger.error("Authorize error from Deriv: %s", data)
                 else:
-                    logger.info("Deriv authorize successful (account-specific features enabled).")
+                    logger.info("Deriv authorize successful.")
                 return
+
             if data.get("error"):
                 logger.warning("Unexpected pre-auth message: %s", data)
                 return
@@ -108,7 +111,7 @@ class DerivWebSocketClient:
         """
         Long-running loop: connects, subscribes, dispatches parsed JSON dicts.
 
-        The callback receives **all** websocket messages (ticks, pings, subscription acks).
+        The callback receives all websocket messages except ping replies.
         """
         self._running = True
         backoff = 1.0
@@ -130,6 +133,7 @@ class DerivWebSocketClient:
 
                     if self._pinger_task:
                         self._pinger_task.cancel()
+
                     self._pinger_task = asyncio.create_task(self._pinger_loop(ws))
 
                     async for raw in ws:
@@ -139,24 +143,29 @@ class DerivWebSocketClient:
                             logger.warning("Non-JSON frame: %s", raw[:200])
                             continue
 
-                     msg_type = data.get("msg_type")
-                     if msg_type == "ping":
-                         continue
+                        msg_type = data.get("msg_type")
+
+                        if msg_type == "ping":
+                            continue
 
                         await on_message(data)
 
             except asyncio.CancelledError:
                 break
+
             except Exception:
                 logger.exception(
-                    "WebSocket connection error — reconnecting in %.1fs", backoff
+                    "WebSocket connection error — reconnecting in %.1fs",
+                    backoff,
                 )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60.0)
+
             finally:
                 if self._pinger_task:
                     self._pinger_task.cancel()
                     self._pinger_task = None
+
                 self._ws = None
 
         logger.info("Deriv tick stream stopped")
@@ -169,9 +178,8 @@ class DerivExecutionGuard:
     """
     Placeholder for proposal / purchase endpoints.
 
-    Deriv trading flows typically involve `proposal`, then `buy` with proposal id.
-    **This repository ships signal-only by default.** These methods raise unless you
-    deliberately satisfy every guard in `.env`.
+    This repository ships signal-only by default.
+    These methods raise unless every guard in .env is satisfied.
     """
 
     def __init__(self, settings: Settings | None = None) -> None:
@@ -179,6 +187,7 @@ class DerivExecutionGuard:
 
     def ensure_execution_allowed(self) -> None:
         ok, reason = execution_allowed(self.settings)
+
         if not ok:
             raise PermissionError(
                 f"Blocked automated execution: {reason} "
@@ -186,25 +195,21 @@ class DerivExecutionGuard:
             )
 
     async def proposal(self, ws: Any | None, payload: dict[str, Any]) -> dict[str, Any]:
-        """
-        Example payload shape (conceptual — verify latest Deriv docs before use):
-          {"proposal": 1, "amount": ..., "basis": "stake", "contract_type": "...", ...}
-        """
         self.ensure_execution_allowed()
+
         if ws is None:
             raise RuntimeError("Execution requires an active authenticated websocket session.")
+
         await ws.send(json.dumps(payload))
         raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
         return json.loads(raw)
 
     async def buy(self, ws: Any | None, payload: dict[str, Any]) -> dict[str, Any]:
-        """
-        Example payload shape:
-          {"buy": proposal_id, "price": stake_amount}
-        """
         self.ensure_execution_allowed()
+
         if ws is None:
             raise RuntimeError("Execution requires an active authenticated websocket session.")
+
         await ws.send(json.dumps(payload))
         raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
         return json.loads(raw)
@@ -212,9 +217,9 @@ class DerivExecutionGuard:
 
 async def fetch_active_symbols_brief(settings: Settings | None = None) -> list[str]:
     """
-    Pull the brief symbol list via websocket — helpful for validating your SYMBOLS=.env entries.
+    Pull the brief symbol list via websocket.
 
-    This is a short-lived connection separate from the main stream.
+    Helpful for validating SYMBOLS=.env entries.
     """
     settings = settings or get_settings()
     uri = build_ws_uri(settings.deriv_app_id)
@@ -223,14 +228,19 @@ async def fetch_active_symbols_brief(settings: Settings | None = None) -> list[s
     async with ws_connect(uri, ping_interval=None) as ws:
         req_id = 1
         await ws.send(json.dumps({"active_symbols": "brief", "req_id": req_id}))
+
         raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
         data = json.loads(raw)
+
         if data.get("error"):
             logger.warning("active_symbols error: %s", data["error"])
             return symbols
+
         lst = data.get("active_symbols") or []
+
         for row in lst:
             sym = row.get("symbol")
             if sym:
                 symbols.append(sym)
+
     return symbols

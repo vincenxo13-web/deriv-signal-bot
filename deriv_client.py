@@ -139,10 +139,9 @@ class DerivWebSocketClient:
                             logger.warning("Non-JSON frame: %s", raw[:200])
                             continue
 
-                        msg_type = data.get("msg_type")
-                        if msg_type == "ping":
-                            await self._send_json(ws, {"ping": data.get("ping", 1)})
-                            continue
+                     msg_type = data.get("msg_type")
+                     if msg_type == "ping":
+                         continue
 
                         await on_message(data)
 

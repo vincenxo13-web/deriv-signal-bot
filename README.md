@@ -4,6 +4,41 @@ Educational and research-oriented asyncio bot that streams **Deriv synthetic Cra
 
 > **Risk warning:** You can lose your entire account balance quickly. This project defaults to **signal-only** mode (`MODE=signal_only`, `ENABLE_REAL_TRADING=false`). Nothing here promises profit or fitness for live trading.
 
+
+---
+
+## Railway persistent data
+
+Railway containers can lose normal app files during redeploys, so keep the SQLite database and logs inside a Railway Volume.
+
+Recommended Railway setup:
+
+1. Add a Railway Volume to the app service.
+2. Mount it at:
+
+```
+/app/data
+```
+
+3. Add this Railway variable:
+
+```
+DATA_DIR=/app/data
+```
+
+With this setup, the bot stores:
+
+```
+/app/data/deriv_signals.db
+/app/data/logs/bot.log
+```
+
+Locally, it still uses:
+
+```
+data/deriv_signals.db
+data/logs/bot.log
+```
 ---
 
 ## 1. What the bot does
@@ -71,7 +106,7 @@ python main.py
 
 Outputs:
 
-- Structured logs under `logs/bot.log`
+- Structured logs under `data/logs/bot.log`
 - Console INFO lines for transparency
 - Optional Telegram notifications if credentials exist
 - Optional macOS `osascript` banner when `osascript` is available

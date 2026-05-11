@@ -16,7 +16,6 @@ import asyncio
 import logging
 import sys
 import time
-from pathlib import Path
 
 from config import get_settings
 from deriv_client import DerivWebSocketClient, fetch_active_symbols_brief
@@ -24,7 +23,7 @@ from market_stream import MarketStreamRouter
 from notifier import Notifier
 from risk_manager import RiskManager
 from signal_engine import SignalEngine
-from storage import Storage
+from storage import DATA_DIR, Storage
 
 
 def setup_logging(level: str) -> None:
@@ -40,7 +39,7 @@ def setup_logging(level: str) -> None:
     console.setFormatter(formatter)
     root.addHandler(console)
 
-    log_dir = Path(__file__).resolve().parent / "logs"
+    log_dir = DATA_DIR / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     fh = logging.FileHandler(log_dir / "bot.log", encoding="utf-8")
     fh.setFormatter(formatter)
@@ -87,7 +86,7 @@ async def runner(validate_only: bool) -> None:
     setup_logging(settings.log_level)
     banner()
 
-    storage = Storage(settings.data_db_path)
+    storage = Storage()
     await storage.set_meta(
         "bot_status",
         {

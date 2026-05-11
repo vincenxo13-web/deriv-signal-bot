@@ -17,6 +17,15 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parent
 
 
+def _data_dir() -> Path:
+    return Path(
+        os.getenv(
+            "RAILWAY_VOLUME_MOUNT_PATH",
+            os.getenv("DATA_DIR", str(_project_root() / "data")),
+        )
+    )
+
+
 load_dotenv(_project_root() / ".env")
 
 
@@ -103,7 +112,7 @@ def get_settings() -> Settings:
     """Singleton-style settings accessor (helps tests reload by clearing module)."""
     global _SETTINGS_INSTANCE
     if _SETTINGS_INSTANCE is None:
-        db_path = _project_root() / "data" / "deriv_signals.db"
+        db_path = _data_dir() / "deriv_signals.db"
 
         symbols = tuple(_split_symbols(os.getenv("SYMBOLS")))
         if not symbols:

@@ -1,16 +1,16 @@
 """
-Alert delivery: console, optional Telegram (HTTPS), optional macOS banners.
-
-Signal-only by default — these are research notifications, not trade instructions.
+Telegram-first notification layer for signal-only alerts.
 """
 
 from __future__ import annotations
 
-import asyncio
+import html
 import logging
 import platform
 import shutil
 import subprocess
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -19,80 +19,119 @@ from strategy import Signal
 logger = logging.getLogger(__name__)
 
 
-def format_signal_message(sig: Signal, risk_label: str = "Medium") -> str:
-    reasons = "; ".join(sig.reasons[:6])
-    warn = ""
-    if sig.volatility_warning:
-        warn = f"\nVolatility note: {sig.volatility_warning}"
+def _fmt_price(value: float) -> str:
+    return f"{value:.5f}"
 
-    return (
-        f"{sig.side} signal on {sig.symbol} — Score: {sig.score:.1f}/100\n"
-        f"Reasons: {reasons}{warn}\n"
-        f"Entry zone: {sig.entry_zone_low:.5f}–{sig.entry_zone_high:.5f}\n"
-        f"SL: {sig.stop_loss:.5f}\n"
-        f"TP1: {sig.take_profit_1:.5f}\n"
-        f"TP2: {sig.take_profit_2:.5f}\n"
-        f"Approx. R-multiple (TP1 vs SL distance): {sig.risk_reward:.2f}:1\n"
-        f"Regime: {sig.regime}\n"
-        f"Risk (qualitative): {risk_label}\n"
-        f"Timeframe: {sig.timeframe}"
-    )
+
+def _fmt_time(epoch: float, tz_name: str) -> tuple[str, str]:
+    utc_dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+    try:
+        local_dt = utc_dt.astimezone(ZoneInfo(tz_name))
+    except Exception:
+        local_dt = utc_dt
+    return local_dt.strftime("%Y-%m-%d %H:%M:%S %Z"), utc_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def risk_bucket_from_score(score: float) -> str:
     if score >= 88:
-        return "Medium–High (still not a guarantee)"
+        return "A+ / very selective"
     if score >= 80:
-        return "Medium"
-    return "Elevated noise risk"
+        return "A / strong"
+    if score >= 72:
+        return "B / valid but be patient"
+    return "C / noisy"
+
+
+def format_signal_message(sig: Signal, tz_name: str = "Asia/Kuala_Lumpur") -> str:
+    local_time, utc_time = _fmt_time(sig.timestamp_epoch, tz_name)
+    arrow = "🟢" if sig.side == "BUY" else "🔴"
+    title = "BOOM SPIKE BUY SETUP" if sig.side == "BUY" else "CRASH DROP SELL SETUP"
+
+    reasons = sig.reasons[:7]
+    reason_lines = "\n".join(f"• {html.escape(reason)}" for reason in reasons)
+    volatility = (
+        f"\n⚠️ <b>Volatility note:</b> {html.escape(sig.volatility_warning)}"
+        if sig.volatility_warning
+        else ""
+    )
+
+    return (
+        f"{arrow} <b>{html.escape(title)}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Symbol:</b> <code>{html.escape(sig.symbol)}</code>\n"
+        f"<b>Action:</b> <b>{html.escape(sig.side)}</b> only\n"
+        f"<b>Score:</b> <b>{sig.score:.1f}/100</b> ({html.escape(risk_bucket_from_score(sig.score))})\n"
+        f"<b>Sent:</b> {html.escape(local_time)}\n"
+        f"<b>UTC:</b> {html.escape(utc_time)}\n\n"
+        f"🎯 <b>Sniper entry zone</b>\n"
+        f"<code>{_fmt_price(sig.entry_zone_low)} - {_fmt_price(sig.entry_zone_high)}</code>\n\n"
+        f"🛑 <b>Invalidation / SL idea:</b> <code>{_fmt_price(sig.stop_loss)}</code>\n"
+        f"✅ <b>TP1:</b> <code>{_fmt_price(sig.take_profit_1)}</code>\n"
+        f"✅ <b>TP2:</b> <code>{_fmt_price(sig.take_profit_2)}</code>\n"
+        f"📐 <b>Approx R:R:</b> {sig.risk_reward:.2f}:1\n\n"
+        f"📌 <b>Why this alert fired</b>\n"
+        f"{reason_lines}"
+        f"{volatility}\n\n"
+        f"📊 <b>Regime:</b> <code>{html.escape(sig.regime)}</code>\n"
+        f"⏱ <b>Timeframe:</b> {html.escape(sig.timeframe)}\n\n"
+        f"⚠️ Signal only — wait for your own confirmation before entering."
+    )
 
 
 class Notifier:
     def __init__(self, settings) -> None:
         self.settings = settings
 
-    async def broadcast(self, sig: Signal) -> None:
-        text = format_signal_message(sig, risk_bucket_from_score(sig.score))
-        logger.info("SIGNAL\n%s", text)
-
-        if self.settings.telegram_bot_token and self.settings.telegram_chat_id:
-            asyncio.create_task(self._send_telegram(text))
-
-        self._maybe_desktop(text, sig)
-
-    async def _send_telegram(self, text: str) -> None:
+    async def send_text(self, text: str) -> bool:
         token = self.settings.telegram_bot_token
         chat = self.settings.telegram_chat_id
         if not token or not chat:
-            return
+            logger.warning("Telegram credentials missing; set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.")
+            return False
+
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         payload = {
             "chat_id": chat,
             "text": text,
+            "parse_mode": self.settings.telegram_parse_mode,
             "disable_web_page_preview": True,
         }
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:
                 resp = await client.post(url, json=payload)
                 resp.raise_for_status()
+            return True
         except Exception:
             logger.exception("Telegram notification failed")
+            return False
 
-    def _maybe_desktop(self, text: str, sig: Signal) -> None:
-        if platform.system() != "Darwin":
+    async def send_startup_message(self) -> None:
+        if not self.settings.notify_on_start:
             return
-        if shutil.which("osascript") is None:
-            return
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        symbols = ", ".join(self.settings.symbols)
+        text = (
+            "✅ <b>Deriv signal bot started</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Mode:</b> Signal-only\n"
+            f"<b>Symbols:</b> <code>{html.escape(symbols)}</code>\n"
+            f"<b>Warmup:</b> {self.settings.signal_warmup_bars} x 1m candles\n"
+            f"<b>Started:</b> {html.escape(now)}"
+        )
+        await self.send_text(text)
 
+    async def broadcast(self, sig: Signal) -> None:
+        text = format_signal_message(sig, self.settings.signal_timezone)
+        logger.info("SIGNAL\n%s", text)
+        await self.send_text(text)
+        self._maybe_desktop(sig)
+
+    def _maybe_desktop(self, sig: Signal) -> None:
+        if platform.system() != "Darwin" or shutil.which("osascript") is None:
+            return
         short = f"{sig.side} {sig.symbol} · {sig.score:.0f}/100"
         script = f'display notification "{short}" with title "Deriv Signal Bot"'
         try:
-            subprocess.run(
-                ["osascript", "-e", script],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
+            subprocess.run(["osascript", "-e", script], check=False, capture_output=True, text=True, timeout=5)
         except Exception:
             logger.debug("Desktop notification failed — ignoring", exc_info=True)

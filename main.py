@@ -1,12 +1,8 @@
 """
-Entry point for the Deriv Crash / Boom signal bot.
+Entry point for the Deriv Crash/Boom signal-only Telegram bot.
 
-This program streams ticks, aggregates candles, scores setups, persists state,
-sends alerts, and can optionally queue Telegram-approved demo trades when every
-execution guard is enabled.
-
-Trading synthetic indices is extremely risky; past performance does not predict
-future results. Use a Demo account while learning.
+The bot streams public Deriv ticks, builds candles, detects sniper-style setups,
+persists state, and sends clean Telegram alerts. It does not place trades.
 """
 
 from __future__ import annotations
@@ -17,14 +13,13 @@ import logging
 import sys
 import time
 
-from config import get_settings
+from config import get_data_dir, get_settings
 from deriv_client import DerivWebSocketClient, fetch_active_symbols_brief
 from market_stream import MarketStreamRouter
 from notifier import Notifier
 from risk_manager import RiskManager
 from signal_engine import SignalEngine
-from storage import DATA_DIR, Storage
-from trade_approval import TelegramApprovalTrader
+from storage import Storage
 
 
 def setup_logging(level: str) -> None:
@@ -40,44 +35,37 @@ def setup_logging(level: str) -> None:
     console.setFormatter(formatter)
     root.addHandler(console)
 
-    log_dir = DATA_DIR / "logs"
+    log_dir = get_data_dir() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    fh = logging.FileHandler(log_dir / "bot.log", encoding="utf-8")
-    fh.setFormatter(formatter)
-    root.addHandler(fh)
+    file_handler = logging.FileHandler(log_dir / "bot.log", encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    root.addHandler(file_handler)
 
 
 def banner() -> None:
     logging.warning("%s", "=" * 76)
+    logging.warning("Deriv Signal Bot starting — TELEGRAM SIGNALS ONLY.")
     logging.warning(
-        "Deriv Signal Bot starting — SIGNAL / RESEARCH USE ONLY.",
+        "Boom symbols will only generate BUY alerts. Crash symbols will only generate SELL alerts."
     )
-    logging.warning(
-        "No outcome is guaranteed. Synthetic indices move sharply; you can lose "
-        "your entire stake rapidly.",
-    )
-    logging.warning(
-        "Execution stays DISABLED unless MODE, ENABLE_REAL_TRADING, token, and "
-        "confirmation guards are deliberately configured.",
-    )
+    logging.warning("No auto-trading code is active in this build.")
     logging.warning("%s", "=" * 76)
 
 
 async def validate_symbols(settings) -> None:
     """Optional helper — Deriv symbol names vary; validate against brief list."""
     try:
-        avail = await fetch_active_symbols_brief(settings)
-        want = {s.upper(): s for s in settings.symbols}
-        avail_set = {a.upper() for a in avail}
-        missing = [want[k] for k in want.keys() if k not in avail_set]
+        available = await fetch_active_symbols_brief(settings)
+        wanted = {symbol.upper(): symbol for symbol in settings.symbols}
+        available_set = {symbol.upper() for symbol in available}
+        missing = [wanted[key] for key in wanted if key not in available_set]
         if missing:
             logging.warning(
-                "The following SYMBOLS entries were not found in active_symbols brief: %s "
-                "(this endpoint may truncate — double-check Trader UI naming).",
+                "These SYMBOLS entries were not found: %s. Double-check Deriv symbol names.",
                 ", ".join(missing),
             )
         else:
-            logging.info("Symbol brief check matched all configured symbols.")
+            logging.info("Symbol check matched all configured symbols.")
     except Exception:
         logging.exception("Symbol validation skipped due to connectivity error")
 
@@ -87,13 +75,16 @@ async def runner(validate_only: bool) -> None:
     setup_logging(settings.log_level)
     banner()
 
-    storage = Storage()
+    storage = Storage(settings.data_db_path)
+    notifier = Notifier(settings)
+
     await storage.set_meta(
         "bot_status",
         {
             "state": "starting",
             "ts": time.time(),
-            "mode": settings.mode,
+            "mode": "signal_only",
+            "symbols": list(settings.symbols),
         },
     )
 
@@ -101,21 +92,11 @@ async def runner(validate_only: bool) -> None:
         await validate_symbols(settings)
         return
 
+    await notifier.send_startup_message()
     asyncio.create_task(heartbeat(storage, settings.symbols))
 
     risk = RiskManager(settings)
-    notifier = Notifier(settings)
-    execution_client = DerivWebSocketClient(settings)
-    approval_trader = TelegramApprovalTrader(storage, settings, execution_client)
-    asyncio.create_task(approval_trader.poll_loop())
-
-    engine = SignalEngine(
-        storage,
-        risk,
-        notifier,
-        settings,
-        approval_trader=approval_trader,
-    )
+    engine = SignalEngine(storage, risk, notifier, settings)
     router = MarketStreamRouter(
         storage,
         settings,
@@ -139,7 +120,7 @@ async def runner(validate_only: bool) -> None:
 
 
 async def heartbeat(storage: Storage, symbols: tuple[str, ...]) -> None:
-    """Lightweight periodic writer so the dashboard shows liveness even if ticks pause."""
+    """Periodic liveness writer for dashboard."""
     while True:
         await asyncio.sleep(30)
         await storage.set_meta(
@@ -149,11 +130,11 @@ async def heartbeat(storage: Storage, symbols: tuple[str, ...]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Deriv Crash/Boom signal bot")
+    parser = argparse.ArgumentParser(description="Deriv Crash/Boom signal-only bot")
     parser.add_argument(
         "--validate-symbols",
         action="store_true",
-        help="Fetch active_symbols brief from Deriv and compare with .env SYMBOLS",
+        help="Fetch active_symbols brief from Deriv and compare with SYMBOLS",
     )
     return parser.parse_args()
 

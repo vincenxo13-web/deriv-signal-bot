@@ -285,7 +285,7 @@ class MarketStreamRouter:
 
     async def _maybe_emit(self, symbol: str, rt: SymbolRuntime) -> None:
         df1 = rt.data_frame_1m()
-        if len(df1) < 220:
+        if len(df1) < self.settings.signal_warmup_bars:
             return
 
         # Spike detection needs the latest bar measured vs ATR — indicators attached here only

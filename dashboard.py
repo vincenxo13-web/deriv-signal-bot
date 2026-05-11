@@ -50,76 +50,6 @@ def load_recent_signals(db_path: Path, limit: int = 50) -> list[dict]:
     return out
 
 
-def load_trade_approvals(db_path: Path, limit: int = 50) -> pd.DataFrame:
-    conn = sqlite3.connect(db_path)
-    try:
-        rows = conn.execute(
-            """
-            SELECT approval_id, status, symbol, side, score, stake, currency,
-                   duration, duration_unit, created_epoch, updated_epoch, note
-            FROM trade_approvals
-            ORDER BY created_epoch DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        rows = []
-    conn.close()
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(
-        rows,
-        columns=[
-            "approval_id", "status", "symbol", "side", "score", "stake",
-            "currency", "duration", "duration_unit", "created_epoch",
-            "updated_epoch", "note",
-        ],
-    )
-    df["created_time"] = pd.to_datetime(df["created_epoch"], unit="s", utc=True)
-    return df
-
-
-def load_trade_executions(db_path: Path, limit: int = 50) -> pd.DataFrame:
-    conn = sqlite3.connect(db_path)
-    try:
-        rows = conn.execute(
-            """
-            SELECT approval_id, status, request_json, response_json, created_epoch
-            FROM trade_executions
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        rows = []
-    conn.close()
-    if not rows:
-        return pd.DataFrame()
-    out = []
-    for approval_id, status, req_json, resp_json, created_epoch in rows:
-        req = json.loads(req_json)
-        resp = json.loads(resp_json)
-        buy_resp = resp.get("buy_response") or {}
-        buy = buy_resp.get("buy") or {}
-        error = buy_resp.get("error") or (resp.get("proposal_response") or {}).get("error") or {}
-        out.append(
-            {
-                "approval_id": approval_id,
-                "status": status,
-                "symbol": req.get("symbol"),
-                "side": req.get("side"),
-                "stake": req.get("stake"),
-                "contract_id": buy.get("contract_id"),
-                "buy_price": buy.get("buy_price"),
-                "error": error.get("message"),
-                "created_time": pd.to_datetime(created_epoch, unit="s", utc=True),
-            }
-        )
-    return pd.DataFrame(out)
-
-
 def load_candles(
     db_path: Path,
     symbol: str,
@@ -330,20 +260,6 @@ def main() -> None:
 
     st.subheader("Recent stored signals")
     st.dataframe(load_recent_signals(db_path))
-
-    st.subheader("Telegram trade approvals")
-    approvals_df = load_trade_approvals(db_path)
-    if approvals_df.empty:
-        st.caption("No trade approvals yet.")
-    else:
-        st.dataframe(approvals_df)
-
-    st.subheader("Trade executions")
-    executions_df = load_trade_executions(db_path)
-    if executions_df.empty:
-        st.caption("No trade executions yet.")
-    else:
-        st.dataframe(executions_df)
 
     time.sleep(refresh)
     st.rerun()

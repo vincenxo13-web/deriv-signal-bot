@@ -1,8 +1,11 @@
 """
-Score-based confluence strategy for Deriv Crash / Boom synthetic indices.
+Signal-only Boom/Crash strategy.
 
-This is educational / research code — not investment advice.
-Scores are capped at 100; default minimum to alert is 75 via config.
+Directional rules requested:
+- BOOM symbols: BUY only, aiming to anticipate upward spike/sniper entries.
+- CRASH symbols: SELL only, aiming to anticipate downward spike/sniper entries.
+
+This is research code, not financial advice.
 """
 
 from __future__ import annotations
@@ -19,17 +22,14 @@ from indicators import (
     candle_rejection_score,
     classify_regime,
     detect_sr_zones,
-    last_bar_spike_metrics,
 )
 
 
 @dataclass
 class SpikeContext:
-    """Recent spike information computed from ticks + last bars."""
-
     last_spike_epoch: float | None
     spike_direction: str  # "up" | "down" | "none"
-    spike_strength: float  # abstract 0..1+
+    spike_strength: float
     tick_velocity: float
 
 
@@ -52,7 +52,6 @@ class Signal:
 
 
 def signal_to_storage_row(sig: Signal) -> dict[str, Any]:
-    """Flatten Signal for SQLite row (extras become JSON blob)."""
     data = asdict(sig)
     ts = float(data.pop("timestamp_epoch"))
     tf = str(data.pop("timeframe"))
@@ -66,140 +65,104 @@ def signal_to_storage_row(sig: Signal) -> dict[str, Any]:
     }
 
 
+def _is_boom(symbol: str) -> bool:
+    return symbol.upper().startswith("BOOM")
+
+
+def _is_crash(symbol: str) -> bool:
+    return symbol.upper().startswith("CRASH")
+
+
 def _resample_ohlc(df_1m: pd.DataFrame, rule: str) -> pd.DataFrame:
-    agg = {
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last",
+    return (
+        df_1m[["open", "high", "low", "close"]]
+        .resample(rule, label="right", closed="right")
+        .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
+        .dropna()
+    )
+
+
+def build_multi_timeframe(df_1m: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    if df_1m.empty:
+        return {"1m": df_1m, "5m": df_1m, "15m": df_1m}
+    ohlc = df_1m[["open", "high", "low", "close"]].copy()
+    return {
+        "1m": ohlc,
+        "5m": _resample_ohlc(ohlc, "5min"),
+        "15m": _resample_ohlc(ohlc, "15min"),
     }
-    out = df_1m.resample(rule, label="right", closed="right").agg(agg).dropna()
-    return out
 
 
-def build_multi_timeframe(dfm_1m: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    """Build 5m / 15m candles from completed 1m history."""
-    if dfm_1m.empty:
-        return {"1m": dfm_1m, "5m": dfm_1m, "15m": dfm_1m}
-    ohlc = dfm_1m[["open", "high", "low", "close"]].copy()
-    df5 = _resample_ohlc(ohlc, "5min")
-    df15 = _resample_ohlc(ohlc, "15min")
-    return {"1m": ohlc, "5m": df5, "15m": df15}
-
-
-def _tf_attach(dfs: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+def _attach_all(dfs: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     out: dict[str, pd.DataFrame] = {}
     for tf, df in dfs.items():
-        if len(df) < 10:
-            out[tf] = df
-            continue
-        out[tf] = attach_core_indicators(df)
+        out[tf] = attach_core_indicators(df) if len(df) >= 10 else df
     return out
 
 
-def _macd_hist_improving(series: pd.Series, side: Literal["BUY", "SELL"]) -> tuple[float, str | None]:
-    s = series.dropna()
-    if len(s) < 5:
-        return 0.0, None
-    last = float(s.iloc[-1])
-    prev = float(s.iloc[-2])
-    older = float(s.iloc[-5])
-    if side == "BUY":
-        improving = last > prev and last > older * 0.6
-        turning = prev <= 0 and last > prev
-        if turning:
-            return 15.0, "MACD histogram turning up"
-        if improving:
-            return 12.0, "MACD histogram strengthening"
-        if last > 0:
-            return 7.0, "MACD histogram positive"
-        return 0.0, None
-    # SELL
-    improving = last < prev and last < older * 0.6
-    turning = prev >= 0 and last < prev
-    if turning:
-        return 15.0, "MACD histogram turning down"
-    if improving:
-        return 12.0, "MACD histogram weakening"
-    if last < 0:
-        return 7.0, "MACD histogram negative"
-    return 0.0, None
-
-
-def _rsi_zone_score(side: Literal["BUY", "SELL"], rsi: float) -> tuple[float, str | None]:
+def _rsi_score(side: Literal["BUY", "SELL"], rsi: float) -> tuple[float, str | None]:
     if np.isnan(rsi):
         return 0.0, None
     if side == "BUY":
-        if 40 <= rsi <= 65:
-            # Peak score mid-range
-            dist = abs(rsi - 52.5)
-            pts = max(0.0, 15.0 - dist * 0.35)
-            return pts, "RSI in healthy bullish zone"
-        if rsi < 40:
-            return 5.0, "RSI not overbought (lower zone)"
-        if rsi > 65:
-            return 0.0, None
+        if 38 <= rsi <= 58:
+            return 14.0, "RSI is in a buy-preparation zone, not overextended"
+        if 30 <= rsi < 38:
+            return 10.0, "RSI is low; possible spring setup before Boom spike"
+        if 58 < rsi <= 66:
+            return 5.0, "RSI positive but entry needs patience"
     else:
-        if 35 <= rsi <= 60:
-            dist = abs(rsi - 47.5)
-            pts = max(0.0, 15.0 - dist * 0.35)
-            return pts, "RSI in healthy bearish zone"
-        if rsi > 60:
-            return 5.0, "RSI not oversold (upper zone)"
-        if rsi < 35:
-            return 0.0, None
+        if 42 <= rsi <= 62:
+            return 14.0, "RSI is in a sell-preparation zone, not oversold"
+        if 62 < rsi <= 72:
+            return 10.0, "RSI is high; possible exhaustion before Crash drop"
+        if 34 <= rsi < 42:
+            return 5.0, "RSI weak but entry needs patience"
     return 0.0, None
 
 
-def _bb_confluence(df: pd.DataFrame, side: Literal["BUY", "SELL"]) -> tuple[float, str | None]:
+def _macd_score(series: pd.Series, side: Literal["BUY", "SELL"]) -> tuple[float, str | None]:
+    s = series.dropna()
+    if len(s) < 6:
+        return 0.0, None
+    last, prev, older = float(s.iloc[-1]), float(s.iloc[-2]), float(s.iloc[-6])
+    if side == "BUY":
+        if last > prev > older:
+            return 13.0, "MACD histogram is improving into a bullish turn"
+        if last > prev:
+            return 8.0, "MACD histogram is starting to improve"
+    else:
+        if last < prev < older:
+            return 13.0, "MACD histogram is weakening into a bearish turn"
+        if last < prev:
+            return 8.0, "MACD histogram is starting to weaken"
+    return 0.0, None
+
+
+def _bb_score(df: pd.DataFrame, side: Literal["BUY", "SELL"]) -> tuple[float, str | None]:
     if not {"bb_lower", "bb_upper", "bb_mid"}.issubset(df.columns):
         return 0.0, None
     bw = bollinger_bandwidth(df).dropna()
     if len(bw) < 30:
         return 0.0, None
-    last_w = float(bw.iloc[-1])
-    med_w = float(bw.iloc[-30:].median())
+
     close = float(df["close"].iloc[-1])
     lower = float(df["bb_lower"].iloc[-1])
     upper = float(df["bb_upper"].iloc[-1])
     mid = float(df["bb_mid"].iloc[-1])
+    last_w = float(bw.iloc[-1])
+    med_w = float(bw.iloc[-30:].median())
 
     if side == "BUY":
-        near_lower = close <= lower + (mid - lower) * 0.35
-        expansion = last_w > med_w * 1.05
-        squeeze_release = med_w < float(bw.iloc[-60:].median()) * 0.9 if len(bw) >= 60 else False
-        pts = 0.0
-        notes: list[str] = []
-        if near_lower:
-            pts += 5.0
-            notes.append("Price near lower Bollinger Band")
-        if expansion:
-            pts += 5.0
-            notes.append("Bollinger bandwidth expanding")
-        if squeeze_release and close > mid:
-            pts += 4.0
-            notes.append("Squeeze release with reclaim of mid-BB")
-        if pts == 0.0:
-            return 0.0, None
-        return min(10.0, pts), "; ".join(notes)
-    # SELL
-    near_upper = close >= upper - (upper - mid) * 0.35
-    expansion = last_w > med_w * 1.05
-    squeeze_release = med_w < float(bw.iloc[-60:].median()) * 0.9 if len(bw) >= 60 else False
-    pts = 0.0
-    notes = []
-    if near_upper:
-        pts += 5.0
-        notes.append("Price near upper Bollinger Band")
-    if expansion:
-        pts += 5.0
-        notes.append("Bollinger bandwidth expanding")
-    if squeeze_release and close < mid:
-        pts += 4.0
-        notes.append("Squeeze release with loss of mid-BB")
-    if pts == 0.0:
-        return 0.0, None
-    return min(10.0, pts), "; ".join(notes)
+        if close <= lower + (mid - lower) * 0.45:
+            return 12.0, "Price is near lower Bollinger area: sniper buy zone"
+        if close > mid and last_w > med_w:
+            return 7.0, "Price reclaimed mid-BB with volatility expanding"
+    else:
+        if close >= upper - (upper - mid) * 0.45:
+            return 12.0, "Price is near upper Bollinger area: sniper sell zone"
+        if close < mid and last_w > med_w:
+            return 7.0, "Price lost mid-BB with volatility expanding"
+    return 0.0, None
 
 
 def _support_resistance_score(
@@ -208,78 +171,100 @@ def _support_resistance_score(
     zones: dict[str, float | None],
     atr: float,
 ) -> tuple[float, str | None]:
-    tol = max(atr * 0.35, 1e-9)
+    tol = max(atr * 0.45, 1e-9)
     if side == "BUY" and zones.get("support") is not None:
-        sup = float(zones["support"])
-        if abs(price - sup) <= tol * 2.2:
-            return 15.0, "Support zone rejection / test"
-        if price > sup and (price - sup) <= tol * 4:
-            return 10.0, "Price holding above nearby support"
+        support = float(zones["support"])
+        if abs(price - support) <= tol * 2.5:
+            return 15.0, "Price is testing/holding support before potential Boom spike"
+        if price > support and (price - support) <= tol * 5:
+            return 9.0, "Price is close above support"
     if side == "SELL" and zones.get("resistance") is not None:
-        res = float(zones["resistance"])
-        if abs(res - price) <= tol * 2.2:
-            return 15.0, "Resistance zone rejection / test"
-        if price < res and (res - price) <= tol * 4:
-            return 10.0, "Price failing below nearby resistance"
+        resistance = float(zones["resistance"])
+        if abs(price - resistance) <= tol * 2.5:
+            return 15.0, "Price is testing/rejecting resistance before potential Crash drop"
+        if price < resistance and (resistance - price) <= tol * 5:
+            return 9.0, "Price is close below resistance"
     return 0.0, None
 
 
-def _spike_penalty(
-    symbol: str,
-    side: Literal["BUY", "SELL"],
-    ctx: SpikeContext,
-    boom: bool,
-) -> tuple[float, str | None]:
-    """
-    Crash/Boom spike behavior differs:
-      - Boom: violent up-spikes common
-      - Crash: violent down-spikes common
-
-    Penalize entries that fight a fresh extreme spike without confirmation.
-    """
-    if ctx.last_spike_epoch is None or ctx.spike_direction == "none":
-        return 0.0, None
-
-    strength = min(2.0, max(0.0, ctx.spike_strength))
-    dangerous = False
-    if boom and side == "SELL" and ctx.spike_direction == "up" and strength > 0.7:
-        dangerous = True
-    if boom and side == "BUY" and ctx.spike_direction == "up" and strength > 1.2:
-        # Chasing vertical blow-off
-        dangerous = True
-    if (not boom) and side == "BUY" and ctx.spike_direction == "down" and strength > 0.7:
-        dangerous = True
-    if (not boom) and side == "SELL" and ctx.spike_direction == "down" and strength > 1.2:
-        dangerous = True
-
-    if dangerous:
-        return -25.0, "Recent abnormal spike — waiting for confirmation is safer"
-    if strength > 0.55:
-        return -10.0, "Elevated post-spike drift — lower confidence"
-    return 0.0, None
-
-
-def _tf_alignment_bonus(dfs: dict[str, pd.DataFrame], side: Literal["BUY", "SELL"]) -> tuple[float, str | None]:
-    """Reward when 5m + 15m EMA stacks agree with the trade direction."""
+def _trend_score(df: pd.DataFrame, side: Literal["BUY", "SELL"]) -> tuple[float, list[str]]:
+    row = df.iloc[-1]
+    close = float(row["close"])
+    ema20 = float(row["ema_20"])
+    ema50 = float(row["ema_50"])
+    ema200 = float(row["ema_200"])
     pts = 0.0
     notes: list[str] = []
+
+    if side == "BUY":
+        # Boom sniper: prefer pullback while structure is not fully broken.
+        if close > ema200:
+            pts += 14.0
+            notes.append("Price is above EMA200, so buy setup has structural support")
+        if ema20 >= ema50:
+            pts += 10.0
+            notes.append("EMA20 is holding above/near EMA50")
+        elif close > ema50:
+            pts += 6.0
+            notes.append("Pullback is still holding around EMA50")
+    else:
+        # Crash sniper: prefer rejection while structure is not fully broken.
+        if close < ema200:
+            pts += 14.0
+            notes.append("Price is below EMA200, so sell setup has structural pressure")
+        if ema20 <= ema50:
+            pts += 10.0
+            notes.append("EMA20 is holding below/near EMA50")
+        elif close < ema50:
+            pts += 6.0
+            notes.append("Pullback is still failing around EMA50")
+    return pts, notes
+
+
+def _higher_tf_score(dfs: dict[str, pd.DataFrame], side: Literal["BUY", "SELL"]) -> tuple[float, str | None]:
+    pts = 0.0
+    aligned: list[str] = []
     for tf in ("5m", "15m"):
         df = dfs.get(tf)
-        if df is None or len(df) < 5:
+        if df is None or len(df) < 5 or not {"ema_20", "ema_50"}.issubset(df.columns):
             continue
         row = df.iloc[-1]
         ema20, ema50 = row.get("ema_20"), row.get("ema_50")
-        if any(pd.isna(v) for v in (ema20, ema50)):
+        if pd.isna(ema20) or pd.isna(ema50):
             continue
-        if side == "BUY" and ema20 > ema50:
+        if side == "BUY" and float(ema20) >= float(ema50):
             pts += 5.0
-            notes.append(f"{tf} EMA20>EMA50")
-        if side == "SELL" and ema20 < ema50:
+            aligned.append(f"{tf} bullish")
+        elif side == "SELL" and float(ema20) <= float(ema50):
             pts += 5.0
-            notes.append(f"{tf} EMA20<EMA50")
-    if pts == 0.0:
+            aligned.append(f"{tf} bearish")
+    if not aligned:
         return 0.0, None
-    return min(10.0, pts), "Higher timeframe trend alignment: " + ", ".join(notes)
+    return min(10.0, pts), "Higher timeframe context agrees: " + ", ".join(aligned)
+
+
+def _spike_context_score(side: Literal["BUY", "SELL"], ctx: SpikeContext) -> tuple[float, str | None]:
+    # We want to enter before the move, not after the spike has already exploded.
+    if ctx.last_spike_epoch is None or ctx.spike_direction == "none":
+        if ctx.tick_velocity > 0:
+            return 3.0, "Tick activity is present; watching for spike trigger"
+        return 0.0, None
+
+    if side == "BUY" and ctx.spike_direction == "up" and ctx.spike_strength > 1.0:
+        return -18.0, "Recent Boom up-spike already fired; avoid chasing"
+    if side == "SELL" and ctx.spike_direction == "down" and ctx.spike_strength > 1.0:
+        return -18.0, "Recent Crash down-spike already fired; avoid chasing"
+    if ctx.spike_strength > 0.55:
+        return -8.0, "Fresh spike volatility detected; signal reduced for safety"
+    return 0.0, None
+
+
+def allowed_side_for_symbol(symbol: str) -> Literal["BUY", "SELL"] | None:
+    if _is_boom(symbol):
+        return "BUY"
+    if _is_crash(symbol):
+        return "SELL"
+    return None
 
 
 def evaluate_signal(
@@ -288,140 +273,87 @@ def evaluate_signal(
     spike_ctx: SpikeContext,
     min_score: float,
     now_epoch: float,
+    warmup_bars: int = 120,
 ) -> Signal | None:
-    """
-    Run the confluence engine on the latest completed 1m history.
-
-    `df_1m` must use a DatetimeIndex (UTC) and OHLC columns.
-    """
-    if df_1m.empty or len(df_1m) < 220:
+    """Evaluate one symbol. Boom returns BUY only; Crash returns SELL only."""
+    side = allowed_side_for_symbol(symbol)
+    if side is None:
+        return None
+    if df_1m.empty or len(df_1m) < warmup_bars:
         return None
 
-    dfs_raw = build_multi_timeframe(df_1m)
-    dfs = _tf_attach(dfs_raw)
+    dfs = _attach_all(build_multi_timeframe(df_1m))
     df1 = dfs["1m"]
-    if df1.empty or len(df1) < 220:
+    if df1.empty or len(df1) < warmup_bars:
         return None
 
-    regime, vol_note = classify_regime(df1)
+    required = {"ema_20", "ema_50", "ema_200", "rsi_14", "atr_14"}
+    if not required.issubset(df1.columns):
+        return None
+
+    row = df1.iloc[-1]
+    last_close = float(row["close"])
+    atr = float(row["atr_14"])
+    rsi = float(row["rsi_14"])
     zones = detect_sr_zones(df1)
-    atr = float(df1["atr_14"].iloc[-1])
-    last_close = float(df1["close"].iloc[-1])
+    regime, vol_note = classify_regime(df1)
 
-    boom = symbol.upper().startswith("BOOM")
+    score = 0.0
+    reasons: list[str] = []
 
-    candidates: list[tuple[Literal["BUY", "SELL"], float, list[str], str | None]] = []
+    pts, notes = _trend_score(df1, side)
+    score += pts
+    reasons.extend(notes)
 
-    for side in ("BUY", "SELL"):
-        reasons: list[str] = []
-        score = 0.0
+    for pts, note in (
+        _rsi_score(side, rsi),
+        _macd_score(df1["macd_hist"], side) if "macd_hist" in df1.columns else (0.0, None),
+        _support_resistance_score(side, last_close, zones, atr),
+        _bb_score(df1, side),
+        candle_rejection_score(side, df1),
+        _higher_tf_score(dfs, side),
+        _spike_context_score(side, spike_ctx),
+    ):
+        score += pts
+        if note:
+            reasons.append(note)
 
-        ema20 = float(df1["ema_20"].iloc[-1])
-        ema50 = float(df1["ema_50"].iloc[-1])
-        ema200 = float(df1["ema_200"].iloc[-1])
-        rsi = float(df1["rsi_14"].iloc[-1])
+    if regime.endswith("high_volatility") or (vol_note and "elevated" in vol_note.lower()):
+        score -= 8.0
+        reasons.append("High volatility haircut applied; wait for clean entry confirmation")
 
-        if side == "BUY":
-            if last_close > ema200:
-                score += 18.0
-                reasons.append("Price above EMA200 (long-term bias)")
-            if ema20 > ema50:
-                score += 17.0
-                reasons.append("EMA20 above EMA50")
-        else:
-            if last_close < ema200:
-                score += 18.0
-                reasons.append("Price below EMA200 (long-term bias)")
-            if ema20 < ema50:
-                score += 17.0
-                reasons.append("EMA20 below EMA50")
-
-        r_pts, r_note = _rsi_zone_score(side, rsi)
-        score += r_pts
-        if r_note:
-            reasons.append(r_note)
-
-        if "macd_hist" in df1.columns:
-            mh_pts, mh_note = _macd_hist_improving(df1["macd_hist"], side)
-            score += mh_pts
-            if mh_note:
-                reasons.append(mh_note)
-
-        sr_pts, sr_note = _support_resistance_score(side, last_close, zones, atr)
-        score += sr_pts
-        if sr_note:
-            reasons.append(sr_note)
-
-        bb_pts, bb_note = _bb_confluence(df1, side)
-        score += bb_pts
-        if bb_note:
-            reasons.append(bb_note)
-
-        rej_pts, rej_note = candle_rejection_score(side, df1)
-        score += rej_pts
-        if rej_note:
-            reasons.append(rej_note)
-
-        tf_pts, tf_note = _tf_alignment_bonus(dfs, side)
-        score += tf_pts
-        if tf_note:
-            reasons.append(tf_note)
-
-        sp_pen, sp_note = _spike_penalty(symbol, side, spike_ctx, boom=boom)
-        score += sp_pen
-        if sp_note:
-            reasons.append(sp_note)
-
-        # Volatility-aware cap: very hot regimes reduce certainty
-        vol_warn = vol_note
-        if regime.endswith("high_volatility") or (
-            isinstance(vol_warn, str) and "elevated" in vol_warn.lower()
-        ):
-            score -= 10.0
-            reasons.append("High volatility haircut applied — consider smaller size")
-
-        score = float(max(0.0, min(100.0, score)))
-
-        if score >= min_score:
-            candidates.append((side, score, reasons, vol_warn))
-
-    if not candidates:
+    score = float(max(0.0, min(100.0, score)))
+    if score < min_score:
         return None
 
-    # Pick stronger side if both pass threshold
-    candidates.sort(key=lambda x: x[1], reverse=True)
-    side, score, reasons, vol_warn = candidates[0]
-
-    last_close = float(df1["close"].iloc[-1])
-    entry_low = last_close - atr * 0.15
-    entry_high = last_close + atr * 0.15
+    entry_low = last_close - atr * 0.18
+    entry_high = last_close + atr * 0.18
     if side == "BUY":
-        sl = entry_low - atr * 2.0
-        tp1 = entry_high + atr * 2.5
-        tp2 = entry_high + atr * 4.0
-        risk = entry_low - sl
-        reward = tp1 - entry_low
+        stop_loss = entry_low - atr * 1.8
+        take_profit_1 = entry_high + atr * 2.2
+        take_profit_2 = entry_high + atr * 3.6
+        risk = entry_low - stop_loss
+        reward = take_profit_1 - entry_low
     else:
-        sl = entry_high + atr * 2.0
-        tp1 = entry_low - atr * 2.5
-        tp2 = entry_low - atr * 4.0
-        risk = sl - entry_high
-        reward = entry_high - tp1
-    rr = float(max(0.0, reward / max(risk, 1e-9)))
+        stop_loss = entry_high + atr * 1.8
+        take_profit_1 = entry_low - atr * 2.2
+        take_profit_2 = entry_low - atr * 3.6
+        risk = stop_loss - entry_high
+        reward = entry_high - take_profit_1
 
     return Signal(
         symbol=symbol,
         side=side,
         score=score,
-        timeframe="1m (multi-TF context: 5m/15m)",
+        timeframe="1m setup with 5m/15m context",
         entry_zone_low=float(entry_low),
         entry_zone_high=float(entry_high),
-        stop_loss=float(sl),
-        take_profit_1=float(tp1),
-        take_profit_2=float(tp2),
-        risk_reward=rr,
+        stop_loss=float(stop_loss),
+        take_profit_1=float(take_profit_1),
+        take_profit_2=float(take_profit_2),
+        risk_reward=float(max(0.0, reward / max(risk, 1e-9))),
         reasons=reasons,
-        volatility_warning=vol_warn,
+        volatility_warning=vol_note,
         regime=regime,
         timestamp_epoch=float(now_epoch),
     )

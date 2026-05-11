@@ -1,2 +1,3 @@
 #!/bin/bash
-streamlit run dashboard.py --server.address=0.0.0.0 --server.port=$PORT
+set -e
+streamlit run dashboard.py --server.address=0.0.0.0 --server.port=${PORT:-8080}

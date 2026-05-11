@@ -33,7 +33,8 @@ def load_recent_signals(db_path: Path, limit: int = 50) -> list[dict]:
     conn = sqlite3.connect(db_path)
     rows = conn.execute(
         """
-        SELECT symbol, side, score, timeframe, payload_json, created_epoch
+        SELECT symbol, side, score, timeframe, payload_json, created_epoch,
+               outcome_status, outcome_epoch, outcome_price, outcome_reason
         FROM signals
         ORDER BY id DESC
         LIMIT ?
@@ -42,12 +43,74 @@ def load_recent_signals(db_path: Path, limit: int = 50) -> list[dict]:
     ).fetchall()
     conn.close()
     out: list[dict] = []
-    for sym, side, score, tf, payload, created in rows:
-        base = {"symbol": sym, "side": side, "score": score, "timeframe": tf, "epoch": created}
+    for row in rows:
+        sym, side, score, tf, payload, created, status, outcome_epoch, outcome_price, outcome_reason = row
+        base = {
+            "symbol": sym,
+            "side": side,
+            "score": score,
+            "timeframe": tf,
+            "epoch": created,
+            "outcome_status": status,
+            "outcome_epoch": outcome_epoch,
+            "outcome_price": outcome_price,
+            "outcome_reason": outcome_reason,
+        }
         extra = json.loads(payload)
         base.update(extra)
         out.append(base)
     return out
+
+
+def load_outcome_stats(db_path: Path, limit_days: int = 30) -> tuple[dict, pd.DataFrame]:
+    cutoff = time.time() - max(1, limit_days) * 86400.0
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        """
+        SELECT symbol, side, outcome_status, COUNT(*) AS count
+        FROM signals
+        WHERE created_epoch >= ?
+        GROUP BY symbol, side, outcome_status
+        ORDER BY symbol ASC, outcome_status ASC
+        """,
+        (cutoff,),
+    ).fetchall()
+    conn.close()
+
+    totals = {"signals": 0, "wins": 0, "losses": 0, "open": 0, "expired": 0}
+    by_symbol: dict[str, dict] = {}
+
+    for sym, side, status, count in rows:
+        rec = by_symbol.setdefault(
+            sym,
+            {"symbol": sym, "signals": 0, "wins": 0, "losses": 0, "open": 0, "expired": 0},
+        )
+        count = int(count)
+        rec["signals"] += count
+        totals["signals"] += count
+
+        if str(status).startswith("WIN"):
+            rec["wins"] += count
+            totals["wins"] += count
+        elif str(status).startswith("LOSS"):
+            rec["losses"] += count
+            totals["losses"] += count
+        elif status == "OPEN":
+            rec["open"] += count
+            totals["open"] += count
+        elif status == "EXPIRED":
+            rec["expired"] += count
+            totals["expired"] += count
+
+    rows_out = []
+    for rec in by_symbol.values():
+        closed = rec["wins"] + rec["losses"] + rec["expired"]
+        rec["win_rate_closed"] = rec["wins"] / max(1, closed)
+        rows_out.append(rec)
+
+    closed_total = totals["wins"] + totals["losses"] + totals["expired"]
+    totals["win_rate_closed"] = totals["wins"] / max(1, closed_total)
+    return totals, pd.DataFrame(rows_out)
 
 
 def load_candles(
@@ -258,8 +321,21 @@ def main() -> None:
 
         st.divider()
 
+    st.subheader("Signal outcome tracking")
+    totals, symbol_stats = load_outcome_stats(db_path)
+    s1, s2, s3, s4, s5 = st.columns(5)
+    s1.metric("Signals tracked", totals.get("signals", 0))
+    s2.metric("Wins", totals.get("wins", 0))
+    s3.metric("Losses", totals.get("losses", 0))
+    s4.metric("Open", totals.get("open", 0))
+    s5.metric("Closed win rate", f"{totals.get('win_rate_closed', 0) * 100:.1f}%")
+    if not symbol_stats.empty:
+        st.dataframe(symbol_stats, use_container_width=True)
+    else:
+        st.caption("No resolved signal outcomes yet. The tracker will update after TP/SL/expiry.")
+
     st.subheader("Recent stored signals")
-    st.dataframe(load_recent_signals(db_path))
+    st.dataframe(load_recent_signals(db_path), use_container_width=True)
 
     time.sleep(refresh)
     st.rerun()

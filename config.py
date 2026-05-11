@@ -78,6 +78,11 @@ class Settings:
     signal_warmup_bars: int
     signal_timezone: str
 
+    # Signal outcome tracking.
+    outcome_tracking_enabled: bool
+    signal_expiry_minutes: int
+    notify_signal_outcomes: bool
+
     # Stream/storage.
     tick_sample_seconds: int
     data_db_path: Path
@@ -130,6 +135,9 @@ def get_settings() -> Settings:
             min_signal_score=_float_env("MIN_SIGNAL_SCORE", 72.0),
             signal_warmup_bars=max(60, _int_env("SIGNAL_WARMUP_BARS", 120)),
             signal_timezone=(os.getenv("SIGNAL_TIMEZONE") or "Asia/Kuala_Lumpur").strip(),
+            outcome_tracking_enabled=_bool_env("OUTCOME_TRACKING_ENABLED", True),
+            signal_expiry_minutes=max(5, _int_env("SIGNAL_EXPIRY_MINUTES", 180)),
+            notify_signal_outcomes=_bool_env("NOTIFY_SIGNAL_OUTCOMES", True),
             tick_sample_seconds=max(0, _int_env("TICK_SAMPLE_SECONDS", 2)),
             data_db_path=db_path,
             dashboard_refresh_seconds=max(1, _int_env("DASHBOARD_REFRESH_SECONDS", 2)),

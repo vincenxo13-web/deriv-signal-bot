@@ -78,6 +78,60 @@ def format_signal_message(sig: Signal, tz_name: str = "Asia/Kuala_Lumpur") -> st
     )
 
 
+def format_outcome_message(event: dict, tz_name: str = "Asia/Kuala_Lumpur") -> str:
+    status = str(event.get("outcome_status", "UNKNOWN"))
+    symbol = html.escape(str(event.get("symbol", "?")))
+    side = html.escape(str(event.get("side", "?")))
+    score = float(event.get("score", 0) or 0)
+    sent_epoch = float(event.get("created_epoch", 0) or 0)
+    outcome_epoch = float(event.get("outcome_epoch", 0) or 0)
+    outcome_price = event.get("outcome_price")
+    reason = html.escape(str(event.get("outcome_reason", "")))
+
+    sent_local, sent_utc = _fmt_time(sent_epoch, tz_name)
+    resolved_local, resolved_utc = _fmt_time(outcome_epoch, tz_name)
+
+    if status == "WIN_TP2":
+        icon = "🏆"
+        title = "TP2 HIT"
+    elif status == "WIN_TP1":
+        icon = "✅"
+        title = "TP1 HIT"
+    elif status == "LOSS_SL":
+        icon = "❌"
+        title = "SL / INVALIDATION HIT"
+    elif status == "LOSS_SL_AMBIGUOUS":
+        icon = "⚠️"
+        title = "AMBIGUOUS CANDLE — MARKED LOSS"
+    elif status == "EXPIRED":
+        icon = "⌛"
+        title = "SIGNAL EXPIRED"
+    else:
+        icon = "ℹ️"
+        title = status
+
+    price_line = ""
+    if outcome_price is not None:
+        try:
+            price_line = f"\n<b>Outcome price:</b> <code>{_fmt_price(float(outcome_price))}</code>"
+        except (TypeError, ValueError):
+            price_line = ""
+
+    return (
+        f"{icon} <b>Signal outcome: {html.escape(title)}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Symbol:</b> <code>{symbol}</code>\n"
+        f"<b>Original action:</b> <b>{side}</b>\n"
+        f"<b>Original score:</b> {score:.1f}/100\n"
+        f"<b>Sent:</b> {html.escape(sent_local)}\n"
+        f"<b>Resolved:</b> {html.escape(resolved_local)}\n"
+        f"<b>UTC:</b> {html.escape(resolved_utc)}"
+        f"{price_line}\n"
+        f"<b>Reason:</b> {reason}\n\n"
+        f"This is tracking only — use it to review signal quality."
+    )
+
+
 class Notifier:
     def __init__(self, settings) -> None:
         self.settings = settings
@@ -125,6 +179,15 @@ class Notifier:
         logger.info("SIGNAL\n%s", text)
         await self.send_text(text)
         self._maybe_desktop(sig)
+
+
+    async def broadcast_outcomes(self, events: list[dict]) -> None:
+        if not events or not self.settings.notify_signal_outcomes:
+            return
+        for event in events:
+            text = format_outcome_message(event, self.settings.signal_timezone)
+            logger.info("SIGNAL OUTCOME\n%s", text)
+            await self.send_text(text)
 
     def _maybe_desktop(self, sig: Signal) -> None:
         if platform.system() != "Darwin" or shutil.which("osascript") is None:

@@ -41,6 +41,11 @@ class SignalEngine:
         df_1m: pd.DataFrame,
         spike_ctx: SpikeContext,
     ) -> None:
+        if df_1m.empty:
+            return
+
+        await self._track_outcomes(symbol, df_1m)
+
         df_feat = attach_core_indicators(df_1m)
         sig = evaluate_signal(
             symbol=symbol,
@@ -72,6 +77,26 @@ class SignalEngine:
 
         await self.notifier.broadcast(sig)
         await self._publish_snapshot(symbol, df_feat, sig, spike_ctx)
+
+    async def _track_outcomes(self, symbol: str, df_1m: pd.DataFrame) -> None:
+        """Resolve previously sent signals when TP/SL/expiry is reached."""
+        if not self.settings.outcome_tracking_enabled or df_1m.empty:
+            return
+
+        last = df_1m.iloc[-1]
+        candle_epoch = float(df_1m.index[-1].timestamp())
+        events = await self.storage.evaluate_open_signal_outcomes(
+            symbol=symbol,
+            candle_epoch=candle_epoch,
+            high=float(last["high"]),
+            low=float(last["low"]),
+            close=float(last["close"]),
+            expiry_minutes=self.settings.signal_expiry_minutes,
+        )
+
+        if events:
+            logger.info("Resolved %s signal outcome(s) for %s", len(events), symbol)
+            await self.notifier.broadcast_outcomes(events)
 
 
     async def _publish_snapshot(

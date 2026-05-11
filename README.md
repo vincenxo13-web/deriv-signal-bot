@@ -46,6 +46,11 @@ SIGNAL_WARMUP_BARS=120
 SIGNAL_TIMEZONE=Asia/Kuala_Lumpur
 TICK_SAMPLE_SECONDS=2
 
+# Outcome tracking
+OUTCOME_TRACKING_ENABLED=true
+SIGNAL_EXPIRY_MINUTES=180
+NOTIFY_SIGNAL_OUTCOMES=true
+
 MAX_SIGNALS_PER_SYMBOL_PER_HOUR=6
 MIN_MINUTES_BETWEEN_SIGNALS_SAME_SYMBOL=10
 COOLDOWN_AFTER_SPIKE_SECONDS=45
@@ -125,6 +130,21 @@ streamlit run dashboard.py
 6. You should receive a startup message if `NOTIFY_ON_START=true`.
 
 If you do not receive the startup message, the Telegram token/chat ID is wrong or the bot has not been started by you in Telegram.
+
+## Signal outcome tracking
+
+The bot now checks every open signal after it is sent. It marks each signal as:
+
+- `WIN_TP1` when TP1 is reached before SL
+- `WIN_TP2` when TP2 is reached before SL
+- `LOSS_SL` when the invalidation/SL is reached first
+- `LOSS_SL_AMBIGUOUS` when TP and SL are both inside the same 1-minute candle
+- `EXPIRED` when no TP/SL is hit before `SIGNAL_EXPIRY_MINUTES`
+- `OPEN` while the signal is still being tracked
+
+Outcome updates are saved to SQLite and shown on the dashboard. If `NOTIFY_SIGNAL_OUTCOMES=true`, Telegram also receives a result message when a signal resolves.
+
+The tracker uses 1-minute OHLC candles. If TP and SL are both touched in the same candle, the exact order is unknown, so it is marked conservatively as an ambiguous loss.
 
 ## Tuning
 

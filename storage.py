@@ -93,9 +93,6 @@ class Storage:
                     outcome_reason TEXT
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_signals_symbol_status
-                ON signals (symbol, outcome_status, created_epoch);
-
                 CREATE TABLE IF NOT EXISTS backtest_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     label TEXT,

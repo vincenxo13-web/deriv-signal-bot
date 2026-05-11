@@ -175,3 +175,24 @@ MIN_MINUTES_BETWEEN_SIGNALS_SAME_SYMBOL=10
 ## Risk note
 
 Signals are research alerts, not guaranteed entries. Synthetic indices can spike hard and reverse quickly. Use your own confirmation before entering any trade.
+
+
+## Two-stage alerts
+
+The bot now sends two kinds of Telegram alerts:
+
+- **Stage 1 / PREP**: the setup is forming near a useful zone. Open the chart and watch.
+- **Stage 2 / TRIGGER**: spike/drop confirmation is active. This is the stronger alert, but still signal-only.
+
+Railway variables:
+
+```env
+PREPARATION_ALERTS_ENABLED=true
+TRIGGER_ALERTS_ENABLED=true
+MIN_SIGNAL_SCORE=72
+TRIGGER_MIN_SIGNAL_SCORE=78
+TRIGGER_SPIKE_STRENGTH=1.0
+TRIGGER_TICK_VELOCITY_MIN=0.02
+```
+
+Boom symbols still produce BUY-only alerts. Crash symbols still produce SELL-only alerts.

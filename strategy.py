@@ -1,9 +1,13 @@
 """
-Signal-only Boom/Crash strategy.
+Two-stage signal-only Boom/Crash strategy.
 
 Directional rules requested:
 - BOOM symbols: BUY only, aiming to anticipate upward spike/sniper entries.
 - CRASH symbols: SELL only, aiming to anticipate downward spike/sniper entries.
+
+Alert stages:
+- PREP: setup is forming near a useful zone; open the chart and watch.
+- TRIGGER: spike/drop confirmation is starting or just fired; stronger action alert.
 
 This is research code, not financial advice.
 """
@@ -23,6 +27,8 @@ from indicators import (
     classify_regime,
     detect_sr_zones,
 )
+
+AlertStage = Literal["PREP", "TRIGGER"]
 
 
 @dataclass
@@ -49,6 +55,7 @@ class Signal:
     volatility_warning: str | None
     regime: str
     timestamp_epoch: float
+    alert_stage: AlertStage = "PREP"
 
 
 def signal_to_storage_row(sig: Signal) -> dict[str, Any]:
@@ -71,6 +78,18 @@ def _is_boom(symbol: str) -> bool:
 
 def _is_crash(symbol: str) -> bool:
     return symbol.upper().startswith("CRASH")
+
+
+def allowed_side_for_symbol(symbol: str) -> Literal["BUY", "SELL"] | None:
+    if _is_boom(symbol):
+        return "BUY"
+    if _is_crash(symbol):
+        return "SELL"
+    return None
+
+
+def _target_spike_direction(side: Literal["BUY", "SELL"]) -> str:
+    return "up" if side == "BUY" else "down"
 
 
 def _resample_ohlc(df_1m: pd.DataFrame, rule: str) -> pd.DataFrame:
@@ -197,7 +216,6 @@ def _trend_score(df: pd.DataFrame, side: Literal["BUY", "SELL"]) -> tuple[float,
     notes: list[str] = []
 
     if side == "BUY":
-        # Boom sniper: prefer pullback while structure is not fully broken.
         if close > ema200:
             pts += 14.0
             notes.append("Price is above EMA200, so buy setup has structural support")
@@ -208,7 +226,6 @@ def _trend_score(df: pd.DataFrame, side: Literal["BUY", "SELL"]) -> tuple[float,
             pts += 6.0
             notes.append("Pullback is still holding around EMA50")
     else:
-        # Crash sniper: prefer rejection while structure is not fully broken.
         if close < ema200:
             pts += 14.0
             notes.append("Price is below EMA200, so sell setup has structural pressure")
@@ -243,39 +260,52 @@ def _higher_tf_score(dfs: dict[str, pd.DataFrame], side: Literal["BUY", "SELL"])
     return min(10.0, pts), "Higher timeframe context agrees: " + ", ".join(aligned)
 
 
-def _spike_context_score(side: Literal["BUY", "SELL"], ctx: SpikeContext) -> tuple[float, str | None]:
-    # We want to enter before the move, not after the spike has already exploded.
+def _spike_preparation_score(side: Literal["BUY", "SELL"], ctx: SpikeContext) -> tuple[float, str | None]:
+    target = _target_spike_direction(side)
+
     if ctx.last_spike_epoch is None or ctx.spike_direction == "none":
         if ctx.tick_velocity > 0:
             return 3.0, "Tick activity is present; watching for spike trigger"
         return 0.0, None
 
-    if side == "BUY" and ctx.spike_direction == "up" and ctx.spike_strength > 1.0:
-        return -18.0, "Recent Boom up-spike already fired; avoid chasing"
-    if side == "SELL" and ctx.spike_direction == "down" and ctx.spike_strength > 1.0:
-        return -18.0, "Recent Crash down-spike already fired; avoid chasing"
+    if ctx.spike_direction == target and ctx.spike_strength >= 1.0:
+        if side == "BUY":
+            return -14.0, "Recent Boom up-spike already fired; prep alert reduced to avoid chasing"
+        return -14.0, "Recent Crash down-spike already fired; prep alert reduced to avoid chasing"
+
     if ctx.spike_strength > 0.55:
-        return -8.0, "Fresh spike volatility detected; signal reduced for safety"
+        return -6.0, "Fresh non-target spike volatility detected; preparation score reduced"
+
     return 0.0, None
 
 
-def allowed_side_for_symbol(symbol: str) -> Literal["BUY", "SELL"] | None:
-    if _is_boom(symbol):
-        return "BUY"
-    if _is_crash(symbol):
-        return "SELL"
-    return None
+def _trigger_confirmation_score(
+    side: Literal["BUY", "SELL"],
+    ctx: SpikeContext,
+    trigger_spike_strength: float,
+    trigger_tick_velocity_min: float,
+) -> tuple[float, str | None]:
+    target = _target_spike_direction(side)
+    if ctx.spike_direction != target:
+        return 0.0, None
+
+    strength_ok = ctx.spike_strength >= trigger_spike_strength
+    velocity_ok = ctx.tick_velocity >= trigger_tick_velocity_min
+
+    if strength_ok and velocity_ok:
+        if side == "BUY":
+            return 22.0, "Boom upward spike trigger confirmed by strength and tick velocity"
+        return 22.0, "Crash downward spike trigger confirmed by strength and tick velocity"
+
+    if strength_ok:
+        if side == "BUY":
+            return 16.0, "Boom upward spike trigger is forming; confirm on chart before entering"
+        return 16.0, "Crash downward spike trigger is forming; confirm on chart before entering"
+
+    return 0.0, None
 
 
-def evaluate_signal(
-    symbol: str,
-    df_1m: pd.DataFrame,
-    spike_ctx: SpikeContext,
-    min_score: float,
-    now_epoch: float,
-    warmup_bars: int = 120,
-) -> Signal | None:
-    """Evaluate one symbol. Boom returns BUY only; Crash returns SELL only."""
+def _base_score(symbol: str, df_1m: pd.DataFrame, spike_ctx: SpikeContext, warmup_bars: int):
     side = allowed_side_for_symbol(symbol)
     if side is None:
         return None
@@ -312,7 +342,7 @@ def evaluate_signal(
         _bb_score(df1, side),
         candle_rejection_score(side, df1),
         _higher_tf_score(dfs, side),
-        _spike_context_score(side, spike_ctx),
+        _spike_preparation_score(side, spike_ctx),
     ):
         score += pts
         if note:
@@ -322,10 +352,10 @@ def evaluate_signal(
         score -= 8.0
         reasons.append("High volatility haircut applied; wait for clean entry confirmation")
 
-    score = float(max(0.0, min(100.0, score)))
-    if score < min_score:
-        return None
+    return side, score, reasons, vol_note, regime, last_close, atr
 
+
+def _make_signal(symbol: str, side: Literal["BUY", "SELL"], score: float, reasons: list[str], volatility_warning: str | None, regime: str, last_close: float, atr: float, now_epoch: float, alert_stage: AlertStage) -> Signal:
     entry_low = last_close - atr * 0.18
     entry_high = last_close + atr * 0.18
     if side == "BUY":
@@ -344,7 +374,7 @@ def evaluate_signal(
     return Signal(
         symbol=symbol,
         side=side,
-        score=score,
+        score=float(max(0.0, min(100.0, score))),
         timeframe="1m setup with 5m/15m context",
         entry_zone_low=float(entry_low),
         entry_zone_high=float(entry_high),
@@ -353,7 +383,47 @@ def evaluate_signal(
         take_profit_2=float(take_profit_2),
         risk_reward=float(max(0.0, reward / max(risk, 1e-9))),
         reasons=reasons,
-        volatility_warning=vol_note,
+        volatility_warning=volatility_warning,
         regime=regime,
         timestamp_epoch=float(now_epoch),
+        alert_stage=alert_stage,
     )
+
+
+def evaluate_signal(
+    symbol: str,
+    df_1m: pd.DataFrame,
+    spike_ctx: SpikeContext,
+    min_score: float,
+    now_epoch: float,
+    warmup_bars: int = 120,
+    trigger_min_score: float = 78.0,
+    trigger_spike_strength: float = 1.0,
+    trigger_tick_velocity_min: float = 0.02,
+    preparation_alerts_enabled: bool = True,
+    trigger_alerts_enabled: bool = True,
+) -> Signal | None:
+    base = _base_score(symbol, df_1m, spike_ctx, warmup_bars)
+    if base is None:
+        return None
+
+    side, prep_score, prep_reasons, vol_note, regime, last_close, atr = base
+    prep_score = float(max(0.0, min(100.0, prep_score)))
+
+    trigger_bonus, trigger_note = _trigger_confirmation_score(
+        side,
+        spike_ctx,
+        trigger_spike_strength=trigger_spike_strength,
+        trigger_tick_velocity_min=trigger_tick_velocity_min,
+    )
+    trigger_score = float(max(0.0, min(100.0, prep_score + trigger_bonus)))
+
+    if trigger_alerts_enabled and trigger_bonus > 0 and trigger_score >= trigger_min_score:
+        reasons = [trigger_note] if trigger_note else []
+        reasons.extend(prep_reasons[:6])
+        return _make_signal(symbol, side, trigger_score, reasons, vol_note, regime, last_close, atr, now_epoch, "TRIGGER")
+
+    if preparation_alerts_enabled and prep_score >= min_score:
+        return _make_signal(symbol, side, prep_score, prep_reasons, vol_note, regime, last_close, atr, now_epoch, "PREP")
+
+    return None

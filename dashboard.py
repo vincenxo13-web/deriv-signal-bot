@@ -301,8 +301,8 @@ def main() -> None:
         last_sig = data.get("last_signal")
         if last_sig:
             c3.markdown(
-                f"Last alert: `{last_sig.get('side')}` @ {last_sig.get('score', 0):.1f} pts "
-                f"— {last_sig.get('summary', '')}",
+                f"Last alert: `{last_sig.get('stage', 'SIGNAL')}` `{last_sig.get('side')}` "
+                f"@ {last_sig.get('score', 0):.1f} pts — {last_sig.get('summary', '')}",
             )
         else:
             c3.markdown("_No qualifying alert since restart / bar close._")

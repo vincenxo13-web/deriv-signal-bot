@@ -49,15 +49,17 @@ class RiskManager:
         spike_ctx: SpikeContext,
     ) -> tuple[bool, str]:
         now = time.time()
-        self._prune_hour(symbol)
+        stage = getattr(signal, "alert_stage", "SIGNAL")
+        throttle_key = f"{symbol}:{stage}"
+        self._prune_hour(throttle_key)
 
-        if len(self._signal_times[symbol]) >= self.settings.max_signals_per_symbol_per_hour:
-            return False, "Hourly signal cap reached for symbol"
+        if len(self._signal_times[throttle_key]) >= self.settings.max_signals_per_symbol_per_hour:
+            return False, f"Hourly {stage} alert cap reached for symbol"
 
         gap = self.settings.min_minutes_between_signals_same_symbol * 60.0
-        last = self._last_signal_epoch.get(symbol)
+        last = self._last_signal_epoch.get(throttle_key)
         if last is not None and (now - last) < gap:
-            return False, "Minimum minutes between signals not elapsed"
+            return False, f"Minimum minutes between {stage} alerts not elapsed"
 
         loss_cool = self._last_loss_epoch.get(symbol)
         if loss_cool is not None and (now - loss_cool) < 45 * 60:
@@ -91,7 +93,8 @@ class RiskManager:
 
         return True, "ok"
 
-    def observe_signal_sent(self, symbol: str, when: float | None = None) -> None:
+    def observe_signal_sent(self, symbol: str, when: float | None = None, stage: str = "SIGNAL") -> None:
         ts = when or time.time()
-        self._signal_times[symbol].append(ts)
-        self._last_signal_epoch[symbol] = ts
+        key = f"{symbol}:{stage}"
+        self._signal_times[key].append(ts)
+        self._last_signal_epoch[key] = ts

@@ -54,6 +54,11 @@ class SignalEngine:
             min_score=self.settings.min_signal_score,
             now_epoch=time.time(),
             warmup_bars=self.settings.signal_warmup_bars,
+            trigger_min_score=self.settings.trigger_min_signal_score,
+            trigger_spike_strength=self.settings.trigger_spike_strength,
+            trigger_tick_velocity_min=self.settings.trigger_tick_velocity_min,
+            preparation_alerts_enabled=self.settings.preparation_alerts_enabled,
+            trigger_alerts_enabled=self.settings.trigger_alerts_enabled,
         )
         if sig is None:
             await self._publish_snapshot(symbol, df_feat, None, spike_ctx)
@@ -73,7 +78,7 @@ class SignalEngine:
 
         row = signal_to_storage_row(sig)
         await self.storage.insert_signal_record(row)
-        self.risk.observe_signal_sent(symbol)
+        self.risk.observe_signal_sent(symbol, stage=sig.alert_stage)
 
         await self.notifier.broadcast(sig)
         await self._publish_snapshot(symbol, df_feat, sig, spike_ctx)
@@ -140,6 +145,7 @@ class SignalEngine:
         if sig is not None:
             sym_state["last_signal"] = {
                 "side": sig.side,
+                "stage": sig.alert_stage,
                 "score": sig.score,
                 "timestamp": sig.timestamp_epoch,
                 "summary": "; ".join(sig.reasons[:3]),

@@ -39,13 +39,23 @@ def risk_bucket_from_score(score: float) -> str:
         return "A / strong"
     if score >= 72:
         return "B / valid but be patient"
-    return "C / noisy"
+    return "C / early/noisy"
 
 
 def format_signal_message(sig: Signal, tz_name: str = "Asia/Kuala_Lumpur") -> str:
     local_time, utc_time = _fmt_time(sig.timestamp_epoch, tz_name)
-    arrow = "🟢" if sig.side == "BUY" else "🔴"
-    title = "BOOM SPIKE BUY SETUP" if sig.side == "BUY" else "CRASH DROP SELL SETUP"
+    stage = getattr(sig, "alert_stage", "PREP")
+
+    if stage == "TRIGGER":
+        arrow = "🟢" if sig.side == "BUY" else "🔴"
+        title = "BOOM SPIKE TRIGGER" if sig.side == "BUY" else "CRASH DROP TRIGGER"
+        stage_line = "Stage 2 / TRIGGER — spike confirmation is active"
+        action_hint = "Act only if your chart confirms entry. This can move fast."
+    else:
+        arrow = "🟡"
+        title = "BOOM BUY PREPARATION" if sig.side == "BUY" else "CRASH SELL PREPARATION"
+        stage_line = "Stage 1 / PREPARATION — setup is forming"
+        action_hint = "Open the chart and wait for confirmation before entering."
 
     reasons = sig.reasons[:7]
     reason_lines = "\n".join(f"• {html.escape(reason)}" for reason in reasons)

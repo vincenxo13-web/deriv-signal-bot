@@ -78,6 +78,13 @@ class Settings:
     signal_warmup_bars: int
     signal_timezone: str
 
+    # Two-stage alert controls.
+    preparation_alerts_enabled: bool
+    trigger_alerts_enabled: bool
+    trigger_min_signal_score: float
+    trigger_spike_strength: float
+    trigger_tick_velocity_min: float
+
     # Signal outcome tracking.
     outcome_tracking_enabled: bool
     signal_expiry_minutes: int
@@ -135,6 +142,11 @@ def get_settings() -> Settings:
             min_signal_score=_float_env("MIN_SIGNAL_SCORE", 72.0),
             signal_warmup_bars=max(60, _int_env("SIGNAL_WARMUP_BARS", 120)),
             signal_timezone=(os.getenv("SIGNAL_TIMEZONE") or "Asia/Kuala_Lumpur").strip(),
+            preparation_alerts_enabled=_bool_env("PREPARATION_ALERTS_ENABLED", True),
+            trigger_alerts_enabled=_bool_env("TRIGGER_ALERTS_ENABLED", True),
+            trigger_min_signal_score=_float_env("TRIGGER_MIN_SIGNAL_SCORE", 78.0),
+            trigger_spike_strength=_float_env("TRIGGER_SPIKE_STRENGTH", 1.0),
+            trigger_tick_velocity_min=_float_env("TRIGGER_TICK_VELOCITY_MIN", 0.02),
             outcome_tracking_enabled=_bool_env("OUTCOME_TRACKING_ENABLED", True),
             signal_expiry_minutes=max(5, _int_env("SIGNAL_EXPIRY_MINUTES", 180)),
             notify_signal_outcomes=_bool_env("NOTIFY_SIGNAL_OUTCOMES", True),

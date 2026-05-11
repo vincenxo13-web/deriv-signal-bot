@@ -4,41 +4,6 @@ Educational and research-oriented asyncio bot that streams **Deriv synthetic Cra
 
 > **Risk warning:** You can lose your entire account balance quickly. This project defaults to **signal-only** mode (`MODE=signal_only`, `ENABLE_REAL_TRADING=false`). Nothing here promises profit or fitness for live trading.
 
-
----
-
-## Railway persistent data
-
-Railway containers can lose normal app files during redeploys, so keep the SQLite database and logs inside a Railway Volume.
-
-Recommended Railway setup:
-
-1. Add a Railway Volume to the app service.
-2. Mount it at:
-
-```
-/app/data
-```
-
-3. Add this Railway variable:
-
-```
-DATA_DIR=/app/data
-```
-
-With this setup, the bot stores:
-
-```
-/app/data/deriv_signals.db
-/app/data/logs/bot.log
-```
-
-Locally, it still uses:
-
-```
-data/deriv_signals.db
-data/logs/bot.log
-```
 ---
 
 ## 1. What the bot does
@@ -106,7 +71,7 @@ python main.py
 
 Outputs:
 
-- Structured logs under `data/logs/bot.log`
+- Structured logs under `logs/bot.log`
 - Console INFO lines for transparency
 - Optional Telegram notifications if credentials exist
 - Optional macOS `osascript` banner when `osascript` is available
@@ -226,3 +191,39 @@ deriv-signal-bot/
 - If you augment the bot to trade, obey local regulations — many jurisdictions classify retail derivatives strictly.
 
 Stay curious, stay sceptical of any “edge,” and prioritise surviving the learning curve intact.
+
+---
+
+## Telegram-approved demo trading
+
+The code includes an optional Telegram approval flow. When a qualifying signal is found, the bot can send an inline Telegram approval message. A Deriv proposal/buy request is only sent after you tap **Approve**.
+
+Recommended Railway/demo variables:
+
+```env
+MODE=approval_trade
+ENABLE_REAL_TRADING=true
+DERIV_REAL_TRADING_CONFIRM=I_UNDERSTAND_REAL_TRADING_RISK
+DERIV_API_TOKEN=your_demo_deriv_api_token
+
+TRADE_APPROVAL_REQUIRED=true
+TRADE_STAKE=1
+TRADE_CURRENCY=USD
+TRADE_DURATION=1
+TRADE_DURATION_UNIT=m
+TRADE_BASIS=stake
+TRADE_MAX_PRICE=1
+TELEGRAM_POLL_SECONDS=2
+
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+TELEGRAM_CHAT_ID=your_numeric_chat_id
+DATA_DIR=/app/data
+```
+
+Notes:
+
+- `BUY` signals are mapped to Deriv `CALL` contracts.
+- `SELL` signals are mapped to Deriv `PUT` contracts.
+- The bot uses a separate authenticated websocket for execution so it does not interfere with the live tick stream.
+- Demo and real Deriv API tokens can both place contracts, so the execution guard is intentionally strict.
+- Keep `TRADE_STAKE` small while testing.

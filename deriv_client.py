@@ -170,6 +170,98 @@ class DerivWebSocketClient:
 
         logger.info("Deriv tick stream stopped")
 
+
+    async def execute_rise_fall_contract(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        stake: float,
+        currency: str,
+        duration: int,
+        duration_unit: str,
+        basis: str = "stake",
+        max_price: float | None = None,
+    ) -> dict[str, Any]:
+        """
+        Open a new authenticated websocket, request a Rise/Fall proposal, then buy it.
+
+        BUY signals map to CALL contracts and SELL signals map to PUT contracts.
+        This method is intended for Telegram-approved demo execution. It still uses
+        execution_allowed() because demo and real tokens can both place contracts.
+        """
+        ok, reason = execution_allowed(self.settings)
+        if not ok:
+            raise PermissionError(f"Blocked automated execution: {reason}")
+        if not self.settings.deriv_api_token:
+            raise PermissionError("DERIV_API_TOKEN is required for execution.")
+
+        contract_type = "CALL" if side.upper() == "BUY" else "PUT"
+        price_cap = float(max_price if max_price is not None else stake)
+        uri = build_ws_uri(self.settings.deriv_app_id)
+
+        proposal_payload = {
+            "proposal": 1,
+            "amount": float(stake),
+            "basis": basis,
+            "contract_type": contract_type,
+            "currency": currency,
+            "duration": int(duration),
+            "duration_unit": duration_unit,
+            "symbol": symbol,
+            "req_id": self._next_req_id(),
+        }
+
+        result: dict[str, Any] = {
+            "proposal_request": proposal_payload,
+            "proposal_response": None,
+            "buy_request": None,
+            "buy_response": None,
+        }
+
+        async with ws_connect(uri, ping_interval=None) as ws:
+            auth_req_id = self._next_req_id()
+            await self._send_json(ws, {"authorize": self.settings.deriv_api_token, "req_id": auth_req_id})
+            auth_raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
+            auth_data = json.loads(auth_raw)
+            if auth_data.get("error"):
+                result["authorize_response"] = auth_data
+                return result
+
+            await self._send_json(ws, proposal_payload)
+            proposal_raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
+            proposal_data = json.loads(proposal_raw)
+            result["proposal_response"] = proposal_data
+
+            if proposal_data.get("error"):
+                return result
+
+            proposal = proposal_data.get("proposal") or {}
+            proposal_id = proposal.get("id")
+            ask_price = float(proposal.get("ask_price", stake))
+            if not proposal_id:
+                result["buy_response"] = {"error": {"message": "No proposal id returned by Deriv."}}
+                return result
+            if ask_price > price_cap:
+                result["buy_response"] = {
+                    "error": {
+                        "message": f"Proposal ask_price {ask_price} exceeded max price {price_cap}."
+                    }
+                }
+                return result
+
+            buy_payload = {
+                "buy": proposal_id,
+                "price": price_cap,
+                "req_id": self._next_req_id(),
+            }
+            result["buy_request"] = buy_payload
+            await self._send_json(ws, buy_payload)
+            buy_raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
+            result["buy_response"] = json.loads(buy_raw)
+
+        return result
+
     def stop(self) -> None:
         self._running = False
 

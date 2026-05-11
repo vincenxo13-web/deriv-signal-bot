@@ -1,9 +1,9 @@
 """
-Entry point for the Deriv Crash / Boom **signal-only** bot.
+Entry point for the Deriv Crash / Boom signal bot.
 
 This program streams ticks, aggregates candles, scores setups, persists state,
-and sends alerts — it does **not** place trades unless you later integrate
-execution flows with every safety guard engaged.
+sends alerts, and can optionally queue Telegram-approved demo trades when every
+execution guard is enabled.
 
 Trading synthetic indices is extremely risky; past performance does not predict
 future results. Use a Demo account while learning.
@@ -24,6 +24,7 @@ from notifier import Notifier
 from risk_manager import RiskManager
 from signal_engine import SignalEngine
 from storage import DATA_DIR, Storage
+from trade_approval import TelegramApprovalTrader
 
 
 def setup_logging(level: str) -> None:
@@ -56,8 +57,8 @@ def banner() -> None:
         "your entire stake rapidly.",
     )
     logging.warning(
-        "Automated BUY/SELL via API stays DISABLED unless you deliberately satisfy "
-        "every execution guard in README + config.",
+        "Execution stays DISABLED unless MODE, ENABLE_REAL_TRADING, token, and "
+        "confirmation guards are deliberately configured.",
     )
     logging.warning("%s", "=" * 76)
 
@@ -104,7 +105,17 @@ async def runner(validate_only: bool) -> None:
 
     risk = RiskManager(settings)
     notifier = Notifier(settings)
-    engine = SignalEngine(storage, risk, notifier, settings)
+    execution_client = DerivWebSocketClient(settings)
+    approval_trader = TelegramApprovalTrader(storage, settings, execution_client)
+    asyncio.create_task(approval_trader.poll_loop())
+
+    engine = SignalEngine(
+        storage,
+        risk,
+        notifier,
+        settings,
+        approval_trader=approval_trader,
+    )
     router = MarketStreamRouter(
         storage,
         settings,

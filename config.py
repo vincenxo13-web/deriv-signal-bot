@@ -17,15 +17,6 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parent
 
 
-def _data_dir() -> Path:
-    return Path(
-        os.getenv(
-            "RAILWAY_VOLUME_MOUNT_PATH",
-            os.getenv("DATA_DIR", str(_project_root() / "data")),
-        )
-    )
-
-
 load_dotenv(_project_root() / ".env")
 
 
@@ -61,6 +52,20 @@ def _split_symbols(raw: str | None) -> list[str]:
         return []
     parts = [p.strip() for p in raw.split(",")]
     return [p for p in parts if p]
+
+
+def data_dir() -> Path:
+    """
+    Persistent data directory.
+
+    Railway:
+      - add a Volume mounted to /app/data
+      - set DATA_DIR=/app/data
+
+    Local:
+      - defaults to ./data inside the project
+    """
+    return Path(os.getenv("RAILWAY_VOLUME_MOUNT_PATH", os.getenv("DATA_DIR", _project_root() / "data")))
 
 
 @dataclass(frozen=True)
@@ -104,6 +109,15 @@ class Settings:
 
     data_db_path: Path
 
+    trade_approval_required: bool
+    trade_stake: float
+    trade_currency: str
+    trade_duration: int
+    trade_duration_unit: str
+    trade_basis: str
+    telegram_poll_seconds: int
+    trade_max_price: float
+
 
 _SETTINGS_INSTANCE: Settings | None = None
 
@@ -112,7 +126,7 @@ def get_settings() -> Settings:
     """Singleton-style settings accessor (helps tests reload by clearing module)."""
     global _SETTINGS_INSTANCE
     if _SETTINGS_INSTANCE is None:
-        db_path = _data_dir() / "deriv_signals.db"
+        db_path = data_dir() / "deriv_signals.db"
 
         symbols = tuple(_split_symbols(os.getenv("SYMBOLS")))
         if not symbols:
@@ -129,6 +143,9 @@ def get_settings() -> Settings:
         confirm_norm = confirm.strip() if confirm else None
         if confirm_norm == "":
             confirm_norm = None
+
+        trade_stake = max(0.35, _float_env("TRADE_STAKE", 1.0))
+        trade_max_price = max(trade_stake, _float_env("TRADE_MAX_PRICE", trade_stake))
 
         _SETTINGS_INSTANCE = Settings(
             deriv_app_id=_int_env("DERIV_APP_ID", 1089),
@@ -173,6 +190,14 @@ def get_settings() -> Settings:
             dashboard_refresh_seconds=max(1, _int_env("DASHBOARD_REFRESH_SECONDS", 2)),
             log_level=(os.getenv("LOG_LEVEL") or "INFO").strip().upper(),
             data_db_path=db_path,
+            trade_approval_required=_bool_env("TRADE_APPROVAL_REQUIRED", True),
+            trade_stake=trade_stake,
+            trade_currency=(os.getenv("TRADE_CURRENCY") or "USD").strip().upper(),
+            trade_duration=max(1, _int_env("TRADE_DURATION", 1)),
+            trade_duration_unit=(os.getenv("TRADE_DURATION_UNIT") or "m").strip(),
+            trade_basis=(os.getenv("TRADE_BASIS") or "stake").strip(),
+            telegram_poll_seconds=max(1, _int_env("TELEGRAM_POLL_SECONDS", 2)),
+            trade_max_price=trade_max_price,
         )
 
     return _SETTINGS_INSTANCE
@@ -182,16 +207,21 @@ def execution_allowed(settings: Settings) -> tuple[bool, str]:
     """
     Deriv proposal/buy/sell must stay blocked unless operator explicitly opts in.
 
-    Signals-only mode never needs this to be True.
+    Demo tokens and real tokens can both place contracts, so this guard is kept even
+    when you plan to use a demo account.
     """
     if settings.mode.strip().lower() == "signal_only":
         return False, "MODE is signal_only (signals only)."
+    if settings.mode.strip().lower() not in {"approval_trade", "auto_trade"}:
+        return False, "MODE must be approval_trade or auto_trade for execution."
     if not settings.enable_real_trading:
         return False, "ENABLE_REAL_TRADING is false."
     expected = "I_UNDERSTAND_REAL_TRADING_RISK"
     if settings.deriv_real_trading_confirm != expected:
         return False, (
             "DERIV_REAL_TRADING_CONFIRM must exactly match the documented phrase "
-            "when enabling real-money execution."
+            "when enabling execution."
         )
-    return True, "Execution checks passed — ensure you understand leverage and risks."
+    if not settings.deriv_api_token:
+        return False, "DERIV_API_TOKEN is missing."
+    return True, "Execution checks passed."

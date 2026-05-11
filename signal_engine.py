@@ -16,6 +16,7 @@ from notifier import Notifier
 from risk_manager import RiskManager
 from storage import Storage
 from strategy import SpikeContext, evaluate_signal, signal_to_storage_row
+from trade_approval import TelegramApprovalTrader
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +30,13 @@ class SignalEngine:
         risk_manager: RiskManager,
         notifier: Notifier,
         settings: Settings | None = None,
+        approval_trader: TelegramApprovalTrader | None = None,
     ) -> None:
         self.storage = storage
         self.risk = risk_manager
         self.notifier = notifier
         self.settings = settings or get_settings()
+        self.approval_trader = approval_trader
 
     async def on_bar_closed(
         self,
@@ -70,13 +73,15 @@ class SignalEngine:
         self.risk.observe_signal_sent(symbol)
 
         await self.notifier.broadcast(sig)
+        if self.approval_trader is not None:
+            await self.approval_trader.submit_signal(sig)
         await self._publish_snapshot(symbol, df_feat, sig, spike_ctx)
 
         ok_exec, exec_reason = execution_allowed(self.settings)
         if self.settings.enable_real_trading:
             logger.warning(
                 "ENABLE_REAL_TRADING is true — execution guard state: %s (%s). "
-                "Automatic order placement is NOT wired in this signal-first build.",
+                "Telegram approval trade flow is enabled only when approval buttons are confirmed.",
                 ok_exec,
                 exec_reason,
             )

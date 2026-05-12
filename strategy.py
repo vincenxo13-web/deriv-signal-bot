@@ -26,7 +26,7 @@ This is research / decision-support code only, not financial advice.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 import numpy as np
@@ -71,7 +71,6 @@ class Signal:
     regime: str
     timestamp_epoch: float
     alert_stage: AlertStage = "PREP"
-    features: dict[str, Any] = field(default_factory=dict)
 
 
 def signal_to_storage_row(sig: Signal) -> dict[str, Any]:
@@ -537,6 +536,7 @@ def evaluate_signal(
     now_epoch: float,
     *,
     signal_warmup_bars: int = 220,
+    warmup_bars: int | None = None,
     preparation_alerts_enabled: bool = True,
     trigger_alerts_enabled: bool = True,
     trigger_min_signal_score: float = 88.0,
@@ -549,6 +549,7 @@ def evaluate_signal(
     min_risk_reward: float = 1.4,
     require_micro_break_for_trigger: bool = True,
     micro_break_lookback: int = 3,
+    **extra_kwargs: Any,
 ) -> Signal | None:
     """
     Run the confluence engine on completed 1m OHLC history.
@@ -560,7 +561,11 @@ def evaluate_signal(
     if side is None:
         return None
 
-    warmup = max(60, int(signal_warmup_bars))
+    # Compatibility: some SignalEngine versions pass warmup_bars,
+    # while config uses signal_warmup_bars. Prefer warmup_bars if supplied.
+    effective_warmup_bars = warmup_bars if warmup_bars is not None else signal_warmup_bars
+    warmup = max(60, int(effective_warmup_bars))
+
     if df_1m.empty or len(df_1m) < warmup:
         return None
 
@@ -700,63 +705,6 @@ def evaluate_signal(
         cleaned_reasons.append(reason)
         seen.add(reason)
 
-    ema20 = _safe_float(row.get("ema_20"))
-    ema50 = _safe_float(row.get("ema_50"))
-    ema200 = _safe_float(row.get("ema_200"))
-    macd_hist = _safe_float(row.get("macd_hist"))
-    bb_lower = _safe_float(row.get("bb_lower"))
-    bb_upper = _safe_float(row.get("bb_upper"))
-    bb_mid = _safe_float(row.get("bb_mid"))
-    close_minus_ema20_atr = (last_close - ema20) / atr if atr else 0.0
-    close_minus_ema50_atr = (last_close - ema50) / atr if atr else 0.0
-    close_minus_ema200_atr = (last_close - ema200) / atr if atr else 0.0
-    bb_position = 0.5
-    if bb_upper > bb_lower:
-        bb_position = (last_close - bb_lower) / max(bb_upper - bb_lower, 1e-9)
-
-    support = zones.get("support")
-    resistance = zones.get("resistance")
-    support_distance_atr = None if support is None else (last_close - float(support)) / atr
-    resistance_distance_atr = None if resistance is None else (float(resistance) - last_close) / atr
-
-    features: dict[str, Any] = {
-        "symbol": symbol,
-        "symbol_type": "BOOM" if _is_boom(symbol) else "CRASH",
-        "side": side,
-        "alert_stage": stage,
-        "score": score,
-        "rsi_14": rsi,
-        "macd_hist": macd_hist,
-        "atr_14": atr,
-        "ema20": ema20,
-        "ema50": ema50,
-        "ema200": ema200,
-        "ema20_gt_ema50": 1 if ema20 > ema50 else 0,
-        "ema50_gt_ema200": 1 if ema50 > ema200 else 0,
-        "close_minus_ema20_atr": close_minus_ema20_atr,
-        "close_minus_ema50_atr": close_minus_ema50_atr,
-        "close_minus_ema200_atr": close_minus_ema200_atr,
-        "bb_position": float(bb_position),
-        "bb_mid": bb_mid,
-        "bb_lower": bb_lower,
-        "bb_upper": bb_upper,
-        "support_distance_atr": support_distance_atr,
-        "resistance_distance_atr": resistance_distance_atr,
-        "spike_direction": spike_ctx.spike_direction,
-        "spike_strength": float(spike_ctx.spike_strength),
-        "tick_velocity": float(spike_ctx.tick_velocity),
-        "spike_pressure_confirmed": 1 if spike_pressure_confirmed else 0,
-        "micro_break_confirmed": 1 if micro_ok else 0,
-        "regime": regime,
-        "risk_reward": rr,
-        "entry_zone_atr_multiplier": float(entry_zone_atr_multiplier),
-        "stop_loss_atr_multiplier": float(stop_loss_atr_multiplier),
-        "take_profit_1_atr_multiplier": float(take_profit_1_atr_multiplier),
-        "take_profit_2_atr_multiplier": float(take_profit_2_atr_multiplier),
-        "hour_utc": int(pd.to_datetime(now_epoch, unit="s", utc=True).hour),
-        "dayofweek_utc": int(pd.to_datetime(now_epoch, unit="s", utc=True).dayofweek),
-    }
-
     return Signal(
         symbol=symbol,
         side=side,
@@ -773,5 +721,4 @@ def evaluate_signal(
         regime=regime,
         timestamp_epoch=float(now_epoch),
         alert_stage=stage,
-        features=features,
     )

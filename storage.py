@@ -178,6 +178,78 @@ class Storage:
                 (WATCH_ONLY_STATUS, signal_id),
             )
 
+    def _migrate_signal_features_table(self, conn: sqlite3.Connection) -> None:
+        """Create/upgrade the ML feature table on existing Railway SQLite DBs.
+
+        Older deployments may already have a database volume but not the
+        signal_features table or its outcome columns. This migration is safe to
+        run on every startup and does not delete old candle/signal data.
+        """
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS signal_features (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                alert_stage TEXT NOT NULL,
+                score REAL NOT NULL,
+                features_json TEXT NOT NULL,
+                created_epoch REAL NOT NULL,
+                outcome_status TEXT NOT NULL DEFAULT 'OPEN',
+                outcome_epoch REAL,
+                outcome_price REAL,
+                outcome_reason TEXT
+            )
+            """
+        )
+
+        rows = conn.execute("PRAGMA table_info(signal_features)").fetchall()
+        existing = {str(row["name"]) for row in rows}
+
+        required = {
+            "signal_id": "INTEGER",
+            "symbol": "TEXT NOT NULL DEFAULT ''",
+            "side": "TEXT NOT NULL DEFAULT ''",
+            "alert_stage": "TEXT NOT NULL DEFAULT 'SIGNAL'",
+            "score": "REAL NOT NULL DEFAULT 0",
+            "features_json": "TEXT NOT NULL DEFAULT '{}'",
+            "created_epoch": "REAL NOT NULL DEFAULT 0",
+            "outcome_status": "TEXT NOT NULL DEFAULT 'OPEN'",
+            "outcome_epoch": "REAL",
+            "outcome_price": "REAL",
+            "outcome_reason": "TEXT",
+        }
+
+        for col, definition in required.items():
+            if col not in existing:
+                conn.execute(
+                    f"ALTER TABLE signal_features ADD COLUMN {col} {definition}"
+                )
+
+        # This unique index is required for INSERT ... ON CONFLICT(signal_id).
+        # It is created separately so older tables can be upgraded safely.
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_features_signal_id_unique
+            ON signal_features (signal_id)
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_signal_features_stage_outcome
+            ON signal_features (alert_stage, outcome_status, created_epoch)
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_signal_features_symbol_stage
+            ON signal_features (symbol, alert_stage, created_epoch)
+            """
+        )
+
     async def set_meta(self, key: str, value: Mapping[str, Any]) -> None:
         payload = json.dumps(dict(value))
         epoch = time.time()

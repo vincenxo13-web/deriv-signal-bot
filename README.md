@@ -215,3 +215,30 @@ MIN_RISK_REWARD=1.2
 ```
 
 Compared with the earlier closer targets, these defaults push TP1/TP2 further away from entry and make outcome stats focus on confirmed `TRIGGER` alerts only.
+
+## ML feature logging, stage 1
+
+This build can log ML-ready feature snapshots for every signal. It does **not** let ML control or block signals yet. The goal is to collect clean data first.
+
+Railway variables:
+
+```env
+ML_FEATURE_LOGGING_ENABLED=true
+ML_TRAINING_MIN_SAMPLES=200
+```
+
+Feature rows are saved in SQLite table `signal_features`. PREP alerts are saved as `WATCH_ONLY`. Only resolved `TRIGGER` rows should be used for future training.
+
+To inspect/export the dataset locally after downloading the SQLite DB:
+
+```bash
+python ml_trainer.py --summary
+python ml_trainer.py --export data/ml_training_rows.csv
+```
+
+Suggested rollout:
+
+- 0-50 resolved TRIGGER rows: collect only.
+- 50-200 resolved TRIGGER rows: inspect statistics only.
+- 200+ resolved TRIGGER rows: begin offline ML experiments.
+- 500+ resolved TRIGGER rows: consider enabling an ML probability filter in a later build.

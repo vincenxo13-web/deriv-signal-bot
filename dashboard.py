@@ -327,6 +327,110 @@ def load_outcome_stats(db_path: Path, limit_days: int = 30) -> tuple[dict[str, A
     return totals, pd.DataFrame(rows_out)
 
 
+
+def load_ml_dataset_stats(db_path: Path, limit_days: int = 30) -> tuple[dict[str, Any], pd.DataFrame]:
+    """Read ML feature logging stats from SQLite for dashboard visibility."""
+    try:
+        cols = _table_columns(db_path, "signal_features")
+    except Exception:
+        return {
+            "total": 0,
+            "trigger_total": 0,
+            "trigger_resolved": 0,
+            "trigger_wins": 0,
+            "trigger_losses": 0,
+            "trigger_open": 0,
+            "trigger_win_rate": 0.0,
+            "prep_watch_only": 0,
+        }, pd.DataFrame()
+
+    if not cols:
+        return {
+            "total": 0,
+            "trigger_total": 0,
+            "trigger_resolved": 0,
+            "trigger_wins": 0,
+            "trigger_losses": 0,
+            "trigger_open": 0,
+            "trigger_win_rate": 0.0,
+            "prep_watch_only": 0,
+        }, pd.DataFrame()
+
+    cutoff = time.time() - max(1, limit_days) * 86400.0
+
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        """
+        SELECT symbol, alert_stage, outcome_status, COUNT(*) AS count
+        FROM signal_features
+        WHERE created_epoch >= ?
+        GROUP BY symbol, alert_stage, outcome_status
+        ORDER BY symbol ASC, alert_stage ASC, outcome_status ASC
+        """,
+        (cutoff,),
+    ).fetchall()
+    conn.close()
+
+    totals = {
+        "total": 0,
+        "trigger_total": 0,
+        "trigger_resolved": 0,
+        "trigger_wins": 0,
+        "trigger_losses": 0,
+        "trigger_open": 0,
+        "trigger_win_rate": 0.0,
+        "prep_watch_only": 0,
+    }
+    by_symbol: dict[str, dict[str, Any]] = {}
+
+    for sym, stage, status, count in rows:
+        sym = str(sym)
+        stage = str(stage or "SIGNAL").upper()
+        status = str(status or "OPEN").upper()
+        count = int(count)
+        totals["total"] += count
+
+        rec = by_symbol.setdefault(
+            sym,
+            {
+                "symbol": sym,
+                "total_features": 0,
+                "trigger_total": 0,
+                "trigger_resolved": 0,
+                "trigger_wins": 0,
+                "trigger_losses": 0,
+                "trigger_open": 0,
+                "prep_watch_only": 0,
+            },
+        )
+        rec["total_features"] += count
+
+        if stage == "TRIGGER":
+            totals["trigger_total"] += count
+            rec["trigger_total"] += count
+            if status == "OPEN":
+                totals["trigger_open"] += count
+                rec["trigger_open"] += count
+            elif status.startswith("WIN"):
+                totals["trigger_wins"] += count
+                totals["trigger_resolved"] += count
+                rec["trigger_wins"] += count
+                rec["trigger_resolved"] += count
+            elif status.startswith("LOSS") or status == "EXPIRED":
+                totals["trigger_losses"] += count
+                totals["trigger_resolved"] += count
+                rec["trigger_losses"] += count
+                rec["trigger_resolved"] += count
+        elif status == "WATCH_ONLY":
+            totals["prep_watch_only"] += count
+            rec["prep_watch_only"] += count
+
+    totals["trigger_win_rate"] = totals["trigger_wins"] / max(1, totals["trigger_resolved"])
+    for rec in by_symbol.values():
+        rec["trigger_win_rate"] = rec["trigger_wins"] / max(1, rec["trigger_resolved"])
+
+    return totals, pd.DataFrame(list(by_symbol.values()))
+
 # -----------------------------
 # Styling
 # -----------------------------
@@ -798,6 +902,21 @@ def main() -> None:
         st.dataframe(symbol_stats, width="stretch")
     else:
         st.caption("No trigger outcome stats yet. PREP alerts are watch-only and ignored here.")
+
+    st.subheader("ML learning dataset")
+    ml_totals, ml_by_symbol = load_ml_dataset_stats(db_path, limit_days=outcome_days)
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Feature rows", ml_totals.get("total", 0))
+    m2.metric("Resolved triggers", ml_totals.get("trigger_resolved", 0))
+    m3.metric("Trigger wins", ml_totals.get("trigger_wins", 0))
+    m4.metric("Trigger losses", ml_totals.get("trigger_losses", 0))
+    m5.metric("Training win rate", f"{ml_totals.get('trigger_win_rate', 0) * 100:.1f}%")
+
+    if not ml_by_symbol.empty:
+        st.dataframe(ml_by_symbol, width="stretch")
+    else:
+        st.caption("No ML feature rows yet. New signals will start filling this dataset.")
 
     st.divider()
 

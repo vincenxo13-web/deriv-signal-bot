@@ -94,6 +94,26 @@ class Storage:
                     outcome_reason TEXT
                 );
 
+                CREATE TABLE IF NOT EXISTS signal_features (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    signal_id INTEGER NOT NULL UNIQUE,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    alert_stage TEXT NOT NULL,
+                    score REAL NOT NULL,
+                    features_json TEXT NOT NULL,
+                    created_epoch REAL NOT NULL,
+                    outcome_status TEXT NOT NULL DEFAULT 'OPEN',
+                    outcome_epoch REAL,
+                    outcome_price REAL,
+                    outcome_reason TEXT,
+                    FOREIGN KEY(signal_id) REFERENCES signals(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_signal_features_stage_outcome
+                ON signal_features (alert_stage, outcome_status, created_epoch);
+
+
                 CREATE TABLE IF NOT EXISTS backtest_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     label TEXT,
@@ -103,6 +123,7 @@ class Storage:
                 """
             )
             self._migrate_signals_table(conn)
+            self._migrate_signal_features_table(conn)
             conn.commit()
 
     def _migrate_signals_table(self, conn: sqlite3.Connection) -> None:
@@ -346,6 +367,195 @@ class Storage:
 
             return await asyncio.to_thread(_read)
 
+    async def insert_signal_features(
+        self,
+        signal_id: int,
+        symbol: str,
+        side: str,
+        alert_stage: str,
+        score: float,
+        features: Mapping[str, Any],
+        created_epoch: float,
+        outcome_status: str | None = None,
+    ) -> None:
+        """Save an ML-ready feature snapshot for one signal."""
+        stage = str(alert_stage or "SIGNAL").upper()
+        status = outcome_status or (OPEN_STATUS if stage == "TRIGGER" else WATCH_ONLY_STATUS)
+        payload = json.dumps(dict(features), sort_keys=True)
+
+        async with self._lock:
+
+            def _write() -> None:
+                with self._connect() as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO signal_features(
+                            signal_id, symbol, side, alert_stage, score,
+                            features_json, created_epoch, outcome_status
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(signal_id) DO UPDATE SET
+                            symbol = excluded.symbol,
+                            side = excluded.side,
+                            alert_stage = excluded.alert_stage,
+                            score = excluded.score,
+                            features_json = excluded.features_json,
+                            created_epoch = excluded.created_epoch,
+                            outcome_status = excluded.outcome_status
+                        """,
+                        (
+                            int(signal_id),
+                            str(symbol),
+                            str(side).upper(),
+                            stage,
+                            float(score),
+                            payload,
+                            float(created_epoch),
+                            status,
+                        ),
+                    )
+                    conn.commit()
+
+            await asyncio.to_thread(_write)
+
+    async def update_signal_feature_outcome(
+        self,
+        signal_id: int,
+        outcome_status: str,
+        outcome_epoch: float | None,
+        outcome_price: float | None,
+        outcome_reason: str | None,
+    ) -> None:
+        """Mirror signal result into the ML feature table."""
+        async with self._lock:
+
+            def _write() -> None:
+                with self._connect() as conn:
+                    conn.execute(
+                        """
+                        UPDATE signal_features
+                        SET outcome_status = ?,
+                            outcome_epoch = ?,
+                            outcome_price = ?,
+                            outcome_reason = ?
+                        WHERE signal_id = ?
+                        """,
+                        (
+                            str(outcome_status),
+                            outcome_epoch,
+                            outcome_price,
+                            outcome_reason,
+                            int(signal_id),
+                        ),
+                    )
+                    conn.commit()
+
+            await asyncio.to_thread(_write)
+
+    async def ml_dataset_stats(self, limit_days: int = 30) -> dict[str, Any]:
+        """Return simple ML dataset counts for dashboard monitoring."""
+        cutoff = time.time() - max(1, limit_days) * 86400.0
+
+        async with self._lock:
+
+            def _read() -> dict[str, Any]:
+                with self._connect() as conn:
+                    rows = conn.execute(
+                        """
+                        SELECT alert_stage, outcome_status, COUNT(*) AS count
+                        FROM signal_features
+                        WHERE created_epoch >= ?
+                        GROUP BY alert_stage, outcome_status
+                        """,
+                        (cutoff,),
+                    ).fetchall()
+
+                stats: dict[str, Any] = {
+                    "total": 0,
+                    "trigger_total": 0,
+                    "trigger_resolved": 0,
+                    "trigger_wins": 0,
+                    "trigger_losses": 0,
+                    "trigger_open": 0,
+                    "prep_watch_only": 0,
+                    "by_stage_status": {},
+                }
+
+                for row in rows:
+                    stage = str(row["alert_stage"] or "SIGNAL").upper()
+                    status = str(row["outcome_status"] or "OPEN").upper()
+                    count = int(row["count"])
+                    stats["total"] += count
+                    stats["by_stage_status"].setdefault(stage, {})[status] = count
+
+                    if stage == "TRIGGER":
+                        stats["trigger_total"] += count
+                        if status == OPEN_STATUS:
+                            stats["trigger_open"] += count
+                        elif status.startswith("WIN"):
+                            stats["trigger_wins"] += count
+                            stats["trigger_resolved"] += count
+                        elif status.startswith("LOSS") or status == "EXPIRED":
+                            stats["trigger_losses"] += count
+                            stats["trigger_resolved"] += count
+                    elif status == WATCH_ONLY_STATUS:
+                        stats["prep_watch_only"] += count
+
+                resolved = max(1, int(stats["trigger_resolved"]))
+                stats["trigger_win_rate"] = float(stats["trigger_wins"]) / resolved
+                return stats
+
+            return await asyncio.to_thread(_read)
+
+    async def load_ml_training_rows(
+        self,
+        limit: int | None = None,
+        include_expired: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Load resolved TRIGGER feature rows for model training/export."""
+        statuses = ["WIN_TP1", "WIN_TP2", "LOSS_SL", "LOSS_SL_AMBIGUOUS"]
+        if include_expired:
+            statuses.append("EXPIRED")
+        placeholders = ",".join("?" for _ in statuses)
+        limit_clause = "LIMIT ?" if limit else ""
+        params: list[Any] = ["TRIGGER", *statuses]
+        if limit:
+            params.append(int(limit))
+
+        async with self._lock:
+
+            def _read() -> list[dict[str, Any]]:
+                with self._connect() as conn:
+                    rows = conn.execute(
+                        f"""
+                        SELECT
+                            signal_id, symbol, side, alert_stage, score,
+                            features_json, created_epoch, outcome_status,
+                            outcome_epoch, outcome_price, outcome_reason
+                        FROM signal_features
+                        WHERE alert_stage = ?
+                          AND outcome_status IN ({placeholders})
+                        ORDER BY created_epoch ASC
+                        {limit_clause}
+                        """,
+                        params,
+                    ).fetchall()
+
+                out: list[dict[str, Any]] = []
+                for row in rows:
+                    base = dict(row)
+                    try:
+                        features = json.loads(base.pop("features_json") or "{}")
+                    except json.JSONDecodeError:
+                        features = {}
+                    success = 1 if str(base.get("outcome_status", "")).startswith("WIN") else 0
+                    base.update(features)
+                    base["success"] = success
+                    out.append(base)
+                return out
+
+            return await asyncio.to_thread(_read)
+
     async def evaluate_open_signal_outcomes(
         self,
         symbol: str,
@@ -431,6 +641,17 @@ class Storage:
                                 outcome_price = ?,
                                 outcome_reason = ?
                             WHERE id = ?
+                            """,
+                            (status, candle_epoch, price, reason, row["id"]),
+                        )
+                        conn.execute(
+                            """
+                            UPDATE signal_features
+                            SET outcome_status = ?,
+                                outcome_epoch = ?,
+                                outcome_price = ?,
+                                outcome_reason = ?
+                            WHERE signal_id = ?
                             """,
                             (status, candle_epoch, price, reason, row["id"]),
                         )

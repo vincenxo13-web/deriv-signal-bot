@@ -82,7 +82,19 @@ class SignalEngine:
             return
 
         row = signal_to_storage_row(sig)
-        await self.storage.insert_signal_record(row)
+        signal_id = await self.storage.insert_signal_record(row)
+
+        if self.settings.ml_feature_logging_enabled:
+            await self.storage.insert_signal_features(
+                signal_id=signal_id,
+                symbol=sig.symbol,
+                side=sig.side,
+                alert_stage=sig.alert_stage,
+                score=sig.score,
+                features=sig.features,
+                created_epoch=sig.timestamp_epoch,
+            )
+
         self.risk.observe_signal_sent(symbol, stage=sig.alert_stage)
 
         await self.notifier.broadcast(sig)

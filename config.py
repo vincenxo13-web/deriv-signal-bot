@@ -97,6 +97,10 @@ class Settings:
     signal_expiry_minutes: int
     notify_signal_outcomes: bool
 
+    # ML feature logging / future training.
+    ml_feature_logging_enabled: bool
+    ml_training_min_samples: int
+
     # Stream/storage.
     tick_sample_seconds: int
     data_db_path: Path
@@ -162,6 +166,8 @@ def get_settings() -> Settings:
             outcome_tracking_enabled=_bool_env("OUTCOME_TRACKING_ENABLED", True),
             signal_expiry_minutes=max(5, _int_env("SIGNAL_EXPIRY_MINUTES", 180)),
             notify_signal_outcomes=_bool_env("NOTIFY_SIGNAL_OUTCOMES", True),
+            ml_feature_logging_enabled=_bool_env("ML_FEATURE_LOGGING_ENABLED", True),
+            ml_training_min_samples=max(20, _int_env("ML_TRAINING_MIN_SAMPLES", 200)),
             tick_sample_seconds=max(0, _int_env("TICK_SAMPLE_SECONDS", 2)),
             data_db_path=db_path,
             dashboard_refresh_seconds=max(1, _int_env("DASHBOARD_REFRESH_SECONDS", 2)),

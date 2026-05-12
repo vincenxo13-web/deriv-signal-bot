@@ -355,19 +355,46 @@ def _base_score(symbol: str, df_1m: pd.DataFrame, spike_ctx: SpikeContext, warmu
     return side, score, reasons, vol_note, regime, last_close, atr
 
 
-def _make_signal(symbol: str, side: Literal["BUY", "SELL"], score: float, reasons: list[str], volatility_warning: str | None, regime: str, last_close: float, atr: float, now_epoch: float, alert_stage: AlertStage) -> Signal:
-    entry_low = last_close - atr * 0.18
-    entry_high = last_close + atr * 0.18
+def _make_signal(
+    symbol: str,
+    side: Literal["BUY", "SELL"],
+    score: float,
+    reasons: list[str],
+    volatility_warning: str | None,
+    regime: str,
+    last_close: float,
+    atr: float,
+    now_epoch: float,
+    alert_stage: AlertStage,
+    entry_zone_atr_multiplier: float = 0.12,
+    stop_loss_atr_multiplier: float = 2.2,
+    take_profit_1_atr_multiplier: float = 3.0,
+    take_profit_2_atr_multiplier: float = 5.0,
+) -> Signal:
+    """Build a signal with wider, configurable TP/SL distances.
+
+    Previous versions used closer targets. On fast Boom/Crash candles, close
+    TP/SL levels can be hit or invalidated too quickly. These multipliers are
+    now Railway-configurable so we can tune using outcome stats.
+    """
+    entry_mult = max(0.05, float(entry_zone_atr_multiplier))
+    sl_mult = max(0.5, float(stop_loss_atr_multiplier))
+    tp1_mult = max(0.5, float(take_profit_1_atr_multiplier))
+    tp2_mult = max(tp1_mult, float(take_profit_2_atr_multiplier))
+
+    entry_low = last_close - atr * entry_mult
+    entry_high = last_close + atr * entry_mult
+
     if side == "BUY":
-        stop_loss = entry_low - atr * 1.8
-        take_profit_1 = entry_high + atr * 2.2
-        take_profit_2 = entry_high + atr * 3.6
+        stop_loss = entry_low - atr * sl_mult
+        take_profit_1 = entry_high + atr * tp1_mult
+        take_profit_2 = entry_high + atr * tp2_mult
         risk = entry_low - stop_loss
         reward = take_profit_1 - entry_low
     else:
-        stop_loss = entry_high + atr * 1.8
-        take_profit_1 = entry_low - atr * 2.2
-        take_profit_2 = entry_low - atr * 3.6
+        stop_loss = entry_high + atr * sl_mult
+        take_profit_1 = entry_low - atr * tp1_mult
+        take_profit_2 = entry_low - atr * tp2_mult
         risk = stop_loss - entry_high
         reward = entry_high - take_profit_1
 
@@ -400,6 +427,11 @@ def evaluate_signal(
     trigger_min_score: float = 78.0,
     trigger_spike_strength: float = 1.0,
     trigger_tick_velocity_min: float = 0.02,
+    entry_zone_atr_multiplier: float = 0.12,
+    stop_loss_atr_multiplier: float = 2.2,
+    take_profit_1_atr_multiplier: float = 3.0,
+    take_profit_2_atr_multiplier: float = 5.0,
+    min_risk_reward: float = 1.2,
     preparation_alerts_enabled: bool = True,
     trigger_alerts_enabled: bool = True,
 ) -> Signal | None:
@@ -421,9 +453,23 @@ def evaluate_signal(
     if trigger_alerts_enabled and trigger_bonus > 0 and trigger_score >= trigger_min_score:
         reasons = [trigger_note] if trigger_note else []
         reasons.extend(prep_reasons[:6])
-        return _make_signal(symbol, side, trigger_score, reasons, vol_note, regime, last_close, atr, now_epoch, "TRIGGER")
+        sig = _make_signal(
+            symbol, side, trigger_score, reasons, vol_note, regime, last_close, atr, now_epoch, "TRIGGER",
+            entry_zone_atr_multiplier=entry_zone_atr_multiplier,
+            stop_loss_atr_multiplier=stop_loss_atr_multiplier,
+            take_profit_1_atr_multiplier=take_profit_1_atr_multiplier,
+            take_profit_2_atr_multiplier=take_profit_2_atr_multiplier,
+        )
+        if sig.risk_reward >= min_risk_reward:
+            return sig
 
     if preparation_alerts_enabled and prep_score >= min_score:
-        return _make_signal(symbol, side, prep_score, prep_reasons, vol_note, regime, last_close, atr, now_epoch, "PREP")
+        return _make_signal(
+            symbol, side, prep_score, prep_reasons, vol_note, regime, last_close, atr, now_epoch, "PREP",
+            entry_zone_atr_multiplier=entry_zone_atr_multiplier,
+            stop_loss_atr_multiplier=stop_loss_atr_multiplier,
+            take_profit_1_atr_multiplier=take_profit_1_atr_multiplier,
+            take_profit_2_atr_multiplier=take_profit_2_atr_multiplier,
+        )
 
     return None

@@ -1,12 +1,9 @@
 """
-Streamlit dashboard for Deriv Crash / Boom signal monitoring.
+Streamlit dashboard for reading live snapshots + historical candles from SQLite.
 
-Features:
-- Dark MT5-style layout
-- Candlestick chart with EMA overlays
-- RSI panel
-- Signal markers on chart
-- Outcome tracking stats
+Run (from project root):
+
+  streamlit run dashboard.py
 """
 
 from __future__ import annotations
@@ -15,9 +12,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any
 
-import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -25,235 +20,57 @@ from config import get_settings
 from indicators import attach_core_indicators
 
 
-# -----------------------------
-# Database helpers
-# -----------------------------
-
 def load_meta(db_path: Path, key: str) -> dict | None:
     conn = sqlite3.connect(db_path)
     row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
     conn.close()
-
     if not row:
         return None
-
     return json.loads(row[0])
 
 
-def _table_columns(db_path: Path, table: str) -> set[str]:
+def load_recent_signals(db_path: Path, limit: int = 50) -> list[dict]:
     conn = sqlite3.connect(db_path)
-    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    conn.close()
-    return {str(row[1]) for row in rows}
-
-
-def load_candles(
-    db_path: Path,
-    symbol: str,
-    timeframe: str,
-    max_bars: int,
-) -> pd.DataFrame:
-    conn = sqlite3.connect(db_path)
-
     rows = conn.execute(
         """
-        SELECT bucket_epoch, open, high, low, close
-        FROM candles
-        WHERE UPPER(symbol) = UPPER(?) AND timeframe = ?
-        ORDER BY bucket_epoch DESC
-        LIMIT ?
-        """,
-        (symbol, timeframe, max_bars),
-    ).fetchall()
-
-    conn.close()
-
-    if not rows:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(
-        rows,
-        columns=["bucket_epoch", "open", "high", "low", "close"],
-    )
-
-    df["datetime"] = pd.to_datetime(df["bucket_epoch"], unit="s", utc=True)
-    df = df.sort_values("datetime").set_index("datetime")
-
-    return df[["open", "high", "low", "close"]]
-
-
-def load_recent_signals(db_path: Path, limit: int = 100) -> list[dict[str, Any]]:
-    cols = _table_columns(db_path, "signals")
-
-    # Some older database versions may use outcome_note instead of outcome_reason.
-    outcome_reason_col = None
-    if "outcome_reason" in cols:
-        outcome_reason_col = "outcome_reason"
-    elif "outcome_note" in cols:
-        outcome_reason_col = "outcome_note"
-
-    select_cols = [
-        "id",
-        "symbol",
-        "side",
-        "score",
-        "timeframe",
-        "payload_json",
-        "created_epoch",
-    ]
-
-    optional_cols = [
-        "outcome_status",
-        "outcome_epoch",
-        "outcome_price",
-    ]
-
-    for col in optional_cols:
-        if col in cols:
-            select_cols.append(col)
-
-    if outcome_reason_col:
-        select_cols.append(f"{outcome_reason_col} AS outcome_reason")
-
-    query = f"""
-        SELECT {", ".join(select_cols)}
+        SELECT symbol, side, score, timeframe, payload_json, created_epoch,
+               outcome_status, outcome_epoch, outcome_price, outcome_reason
         FROM signals
         ORDER BY id DESC
         LIMIT ?
-    """
-
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(query, (limit,)).fetchall()
+        """,
+        (limit,),
+    ).fetchall()
     conn.close()
-
-    out: list[dict[str, Any]] = []
-
+    out: list[dict] = []
     for row in rows:
-        base = dict(row)
-
-        payload = base.pop("payload_json", "{}")
-        try:
-            extra = json.loads(payload) if payload else {}
-        except json.JSONDecodeError:
-            extra = {}
-
+        sym, side, score, tf, payload, created, status, outcome_epoch, outcome_price, outcome_reason = row
+        base = {
+            "symbol": sym,
+            "side": side,
+            "score": score,
+            "timeframe": tf,
+            "epoch": created,
+            "outcome_status": status,
+            "outcome_epoch": outcome_epoch,
+            "outcome_price": outcome_price,
+            "outcome_reason": outcome_reason,
+        }
+        extra = json.loads(payload)
         base.update(extra)
-
-        # Normalise some common field names.
-        base.setdefault("alert_stage", base.get("stage", "SIGNAL"))
-        base.setdefault("outcome_status", "OPEN")
-
         out.append(base)
-
     return out
 
 
-def load_chart_signals(
-    db_path: Path,
-    symbol: str,
-    start_dt: pd.Timestamp,
-    end_dt: pd.Timestamp,
-) -> pd.DataFrame:
-    all_signals = load_recent_signals(db_path, limit=500)
-
-    rows: list[dict[str, Any]] = []
-
-    start_epoch = start_dt.timestamp()
-    end_epoch = end_dt.timestamp()
-
-    for sig in all_signals:
-        if str(sig.get("symbol", "")).upper() != symbol.upper():
-            continue
-
-        created = float(sig.get("created_epoch") or sig.get("epoch") or 0)
-
-        if created < start_epoch or created > end_epoch:
-            continue
-
-        entry_low = sig.get("entry_zone_low")
-        entry_high = sig.get("entry_zone_high")
-
-        if entry_low is not None and entry_high is not None:
-            marker_price = (float(entry_low) + float(entry_high)) / 2
-        elif sig.get("outcome_price") is not None:
-            marker_price = float(sig["outcome_price"])
-        else:
-            marker_price = None
-
-        if marker_price is None:
-            continue
-
-        stage = str(sig.get("alert_stage", sig.get("stage", "SIGNAL"))).upper()
-        side = str(sig.get("side", "")).upper()
-        score = float(sig.get("score") or 0)
-        outcome = str(sig.get("outcome_status", "OPEN")).upper()
-
-        if stage == "TRIGGER":
-            marker_label = f"{side} TRIGGER {score:.0f}"
-        elif stage == "PREP":
-            marker_label = f"{side} PREP {score:.0f}"
-        else:
-            marker_label = f"{side} {score:.0f}"
-
-        if outcome.startswith("WIN"):
-            marker_status = "WIN"
-        elif outcome.startswith("LOSS"):
-            marker_status = "LOSS"
-        elif outcome == "EXPIRED":
-            marker_status = "EXPIRED"
-        else:
-            marker_status = "OPEN"
-
-        rows.append(
-            {
-                "datetime": pd.to_datetime(created, unit="s", utc=True),
-                "price": marker_price,
-                "symbol": sig.get("symbol"),
-                "side": side,
-                "stage": stage,
-                "score": score,
-                "outcome": outcome,
-                "marker_status": marker_status,
-                "label": marker_label,
-                "entry_zone_low": sig.get("entry_zone_low"),
-                "entry_zone_high": sig.get("entry_zone_high"),
-                "stop_loss": sig.get("stop_loss"),
-                "take_profit_1": sig.get("take_profit_1"),
-                "take_profit_2": sig.get("take_profit_2"),
-            }
-        )
-
-    if not rows:
-        return pd.DataFrame()
-
-    return pd.DataFrame(rows)
-
-
-def load_outcome_stats(db_path: Path, limit_days: int = 30) -> tuple[dict[str, Any], pd.DataFrame]:
-    cols = _table_columns(db_path, "signals")
-
-    if "outcome_status" not in cols:
-        return (
-            {
-                "signals": 0,
-                "wins": 0,
-                "losses": 0,
-                "open": 0,
-                "expired": 0,
-                "win_rate_closed": 0.0,
-            },
-            pd.DataFrame(),
-        )
-
+def load_outcome_stats(db_path: Path, limit_days: int = 30) -> tuple[dict, pd.DataFrame]:
     cutoff = time.time() - max(1, limit_days) * 86400.0
-
     conn = sqlite3.connect(db_path)
     rows = conn.execute(
         """
         SELECT symbol, side, outcome_status, COUNT(*) AS count
         FROM signals
         WHERE created_epoch >= ?
+          AND outcome_status != 'WATCH_ONLY'
         GROUP BY symbol, side, outcome_status
         ORDER BY symbol ASC, outcome_status ASC
         """,
@@ -261,39 +78,22 @@ def load_outcome_stats(db_path: Path, limit_days: int = 30) -> tuple[dict[str, A
     ).fetchall()
     conn.close()
 
-    totals = {
-        "signals": 0,
-        "wins": 0,
-        "losses": 0,
-        "open": 0,
-        "expired": 0,
-    }
-
-    by_symbol: dict[str, dict[str, Any]] = {}
+    totals = {"trigger_signals": 0, "wins": 0, "losses": 0, "open": 0, "expired": 0}
+    by_symbol: dict[str, dict] = {}
 
     for sym, side, status, count in rows:
         rec = by_symbol.setdefault(
             sym,
-            {
-                "symbol": sym,
-                "signals": 0,
-                "wins": 0,
-                "losses": 0,
-                "open": 0,
-                "expired": 0,
-            },
+            {"symbol": sym, "trigger_signals": 0, "wins": 0, "losses": 0, "open": 0, "expired": 0},
         )
-
         count = int(count)
-        status = str(status or "OPEN").upper()
+        rec["trigger_signals"] += count
+        totals["trigger_signals"] += count
 
-        rec["signals"] += count
-        totals["signals"] += count
-
-        if status.startswith("WIN"):
+        if str(status).startswith("WIN"):
             rec["wins"] += count
             totals["wins"] += count
-        elif status.startswith("LOSS"):
+        elif str(status).startswith("LOSS"):
             rec["losses"] += count
             totals["losses"] += count
         elif status == "OPEN":
@@ -304,7 +104,6 @@ def load_outcome_stats(db_path: Path, limit_days: int = 30) -> tuple[dict[str, A
             totals["expired"] += count
 
     rows_out = []
-
     for rec in by_symbol.values():
         closed = rec["wins"] + rec["losses"] + rec["expired"]
         rec["win_rate_closed"] = rec["wins"] / max(1, closed)
@@ -312,366 +111,146 @@ def load_outcome_stats(db_path: Path, limit_days: int = 30) -> tuple[dict[str, A
 
     closed_total = totals["wins"] + totals["losses"] + totals["expired"]
     totals["win_rate_closed"] = totals["wins"] / max(1, closed_total)
-
     return totals, pd.DataFrame(rows_out)
 
 
-# -----------------------------
-# Styling
-# -----------------------------
-
-def apply_dark_style() -> None:
-    st.markdown(
+def load_candles(
+    db_path: Path,
+    symbol: str,
+    timeframe: str,
+    max_bars: int,
+) -> pd.DataFrame:
+    """Load OHLC candles oldest-first (for charts)."""
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
         """
-        <style>
-        .stApp {
-            background: #05070d;
-            color: #f5f7fb;
-        }
-
-        [data-testid="stSidebar"] {
-            background: #090d16;
-        }
-
-        .block-container {
-            padding-top: 1.25rem;
-            padding-bottom: 2rem;
-        }
-
-        div[data-testid="stMetric"] {
-            background: #0d1422;
-            border: 1px solid #1f2a3d;
-            padding: 14px;
-            border-radius: 14px;
-        }
-
-        div[data-testid="stMetricLabel"] {
-            color: #8ea0bb;
-        }
-
-        div[data-testid="stMetricValue"] {
-            color: #f8fafc;
-        }
-
-        .market-card {
-            background: #0d1422;
-            border: 1px solid #1f2a3d;
-            border-radius: 14px;
-            padding: 14px 16px;
-            margin-bottom: 10px;
-        }
-
-        .signal-good {
-            color: #30d158;
-            font-weight: 700;
-        }
-
-        .signal-warn {
-            color: #ffd60a;
-            font-weight: 700;
-        }
-
-        .signal-bad {
-            color: #ff453a;
-            font-weight: 700;
-        }
-
-        .small-muted {
-            color: #8ea0bb;
-            font-size: 0.90rem;
-        }
-        </style>
+        SELECT bucket_epoch, open, high, low, close
+        FROM candles
+        WHERE UPPER(symbol) = UPPER(?) AND timeframe = ?
+        ORDER BY bucket_epoch DESC
+        LIMIT ?
         """,
-        unsafe_allow_html=True,
-    )
+        (symbol, timeframe, max_bars),
+    ).fetchall()
+    conn.close()
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows, columns=["bucket_epoch", "open", "high", "low", "close"])
+    df["datetime"] = pd.to_datetime(df["bucket_epoch"], unit="s", utc=True)
+    df = df.sort_values("datetime").set_index("datetime")
+    return df[["open", "high", "low", "close"]]
 
 
-# -----------------------------
-# Chart helpers
-# -----------------------------
+def indicator_status(rsi: float | None, macd_hist: float | None) -> str:
+    parts = []
+    if rsi is None:
+        parts.append("RSI warming up")
+    elif rsi >= 65:
+        parts.append("RSI stretched higher")
+    elif rsi <= 35:
+        parts.append("RSI stretched lower")
+    else:
+        parts.append("RSI mid-zone")
 
-def build_candle_chart(df: pd.DataFrame, signal_df: pd.DataFrame) -> alt.Chart:
-    chart_df = df.copy()
-    chart_df = attach_core_indicators(chart_df)
-    chart_df = chart_df.reset_index()
-
-    chart_df["direction"] = chart_df.apply(
-        lambda row: "up" if row["close"] >= row["open"] else "down",
-        axis=1,
-    )
-
-    base = alt.Chart(chart_df).encode(
-        x=alt.X(
-            "datetime:T",
-            axis=alt.Axis(
-                title=None,
-                labelColor="#a8b3c7",
-                gridColor="#1b2434",
-            ),
-        )
-    )
-
-    rule = base.mark_rule().encode(
-        y=alt.Y(
-            "low:Q",
-            title="Price",
-            axis=alt.Axis(
-                labelColor="#a8b3c7",
-                titleColor="#a8b3c7",
-                gridColor="#1b2434",
-            ),
-            scale=alt.Scale(zero=False),
-        ),
-        y2="high:Q",
-        color=alt.Color(
-            "direction:N",
-            scale=alt.Scale(
-                domain=["up", "down"],
-                range=["#00c853", "#ff5252"],
-            ),
-            legend=None,
-        ),
-        tooltip=[
-            alt.Tooltip("datetime:T", title="Time"),
-            alt.Tooltip("open:Q", title="Open", format=".5f"),
-            alt.Tooltip("high:Q", title="High", format=".5f"),
-            alt.Tooltip("low:Q", title="Low", format=".5f"),
-            alt.Tooltip("close:Q", title="Close", format=".5f"),
-        ],
-    )
-
-    candle = base.mark_bar(size=5).encode(
-        y="open:Q",
-        y2="close:Q",
-        color=alt.Color(
-            "direction:N",
-            scale=alt.Scale(
-                domain=["up", "down"],
-                range=["#00c853", "#ff5252"],
-            ),
-            legend=None,
-        ),
-    )
-
-    ema_data = chart_df.melt(
-        id_vars=["datetime"],
-        value_vars=["ema_20", "ema_50", "ema_200"],
-        var_name="EMA",
-        value_name="value",
-    ).dropna()
-
-    ema = alt.Chart(ema_data).mark_line(strokeWidth=1.5).encode(
-        x="datetime:T",
-        y="value:Q",
-        color=alt.Color(
-            "EMA:N",
-            scale=alt.Scale(
-                domain=["ema_20", "ema_50", "ema_200"],
-                range=["#4da3ff", "#ffd60a", "#b388ff"],
-            ),
-            legend=alt.Legend(labelColor="#a8b3c7", titleColor="#a8b3c7"),
-        ),
-    )
-
-    layers = [rule, candle, ema]
-
-    if not signal_df.empty:
-        marker_colors = alt.Scale(
-            domain=["WIN", "LOSS", "EXPIRED", "OPEN"],
-            range=["#30d158", "#ff453a", "#8ea0bb", "#ffd60a"],
-        )
-
-        signal_points = (
-            alt.Chart(signal_df)
-            .mark_point(
-                filled=True,
-                size=160,
-                stroke="#ffffff",
-                strokeWidth=1.2,
-            )
-            .encode(
-                x="datetime:T",
-                y="price:Q",
-                shape=alt.Shape(
-                    "stage:N",
-                    scale=alt.Scale(
-                        domain=["PREP", "TRIGGER", "SIGNAL"],
-                        range=["triangle-up", "diamond", "circle"],
-                    ),
-                    legend=alt.Legend(labelColor="#a8b3c7", titleColor="#a8b3c7"),
-                ),
-                color=alt.Color(
-                    "marker_status:N",
-                    scale=marker_colors,
-                    legend=alt.Legend(labelColor="#a8b3c7", titleColor="#a8b3c7"),
-                ),
-                tooltip=[
-                    alt.Tooltip("datetime:T", title="Signal time"),
-                    alt.Tooltip("symbol:N", title="Symbol"),
-                    alt.Tooltip("stage:N", title="Stage"),
-                    alt.Tooltip("side:N", title="Side"),
-                    alt.Tooltip("score:Q", title="Score", format=".1f"),
-                    alt.Tooltip("price:Q", title="Marker price", format=".5f"),
-                    alt.Tooltip("entry_zone_low:Q", title="Entry low", format=".5f"),
-                    alt.Tooltip("entry_zone_high:Q", title="Entry high", format=".5f"),
-                    alt.Tooltip("stop_loss:Q", title="SL", format=".5f"),
-                    alt.Tooltip("take_profit_1:Q", title="TP1", format=".5f"),
-                    alt.Tooltip("take_profit_2:Q", title="TP2", format=".5f"),
-                    alt.Tooltip("outcome:N", title="Outcome"),
-                ],
-            )
-        )
-
-        signal_labels = (
-            alt.Chart(signal_df)
-            .mark_text(
-                align="left",
-                dx=8,
-                dy=-10,
-                fontSize=11,
-                fontWeight="bold",
-                color="#f8fafc",
-            )
-            .encode(
-                x="datetime:T",
-                y="price:Q",
-                text="label:N",
-            )
-        )
-
-        layers.extend([signal_points, signal_labels])
-
-    chart = (
-        alt.layer(*layers)
-        .properties(height=520)
-        .configure_view(strokeWidth=0)
-        .configure_axis(
-            labelColor="#a8b3c7",
-            titleColor="#a8b3c7",
-            gridColor="#1b2434",
-        )
-        .configure(background="#05070d")
-    )
-
-    return chart
+    if macd_hist is None:
+        parts.append("MACD warming up")
+    elif macd_hist >= 0:
+        parts.append("MACD histogram >= 0")
+    else:
+        parts.append("MACD histogram < 0")
+    return " · ".join(parts)
 
 
-def build_rsi_chart(df: pd.DataFrame) -> alt.Chart:
+def ema_status(em20: float | None, em50: float | None, em200: float | None) -> str:
+    if em20 is None or em50 is None or em200 is None:
+        return "EMAs still forming"
+    if em20 > em50 > em200:
+        return "EMA stack bullish (20>50>200)"
+    if em20 < em50 < em200:
+        return "EMA stack bearish (20<50<200)"
+    return "EMA stack mixed / transition"
+
+
+def render_symbol_charts(db_path: Path, symbol: str, timeframe: str, max_bars: int) -> None:
+    df = load_candles(db_path, symbol, timeframe, max_bars)
+    if df.empty or len(df) < 5:
+        st.info(f"No candle data yet for **{symbol}** · **{timeframe}** — wait for the bot to accumulate bars.")
+        return
+
     feat = attach_core_indicators(df)
-    rsi_df = feat.reset_index()[["datetime", "rsi_14"]].dropna()
+    last = feat.iloc[-1]
 
-    if rsi_df.empty:
-        return alt.Chart(pd.DataFrame({"x": [], "y": []})).mark_line()
-
-    base = alt.Chart(rsi_df).encode(
-        x=alt.X(
-            "datetime:T",
-            axis=alt.Axis(title=None, labelColor="#a8b3c7", gridColor="#1b2434"),
-        ),
-        y=alt.Y(
-            "rsi_14:Q",
-            title="RSI",
-            scale=alt.Scale(domain=[0, 100]),
-            axis=alt.Axis(labelColor="#a8b3c7", titleColor="#a8b3c7", gridColor="#1b2434"),
-        ),
+    price_block = pd.DataFrame(
+        {
+            "close": feat["close"],
+            "ema_20": feat["ema_20"],
+            "ema_50": feat["ema_50"],
+            "ema_200": feat["ema_200"],
+        }
     )
+    st.markdown("**Price + EMAs**")
+    st.line_chart(price_block, height=320)
 
-    rsi_line = base.mark_line(color="#4da3ff", strokeWidth=2)
-
-    levels = pd.DataFrame({"level": [15, 50, 85]})
-
-    level_lines = (
-        alt.Chart(levels)
-        .mark_rule(strokeDash=[5, 5], color="#64748b")
-        .encode(y="level:Q")
-    )
-
-    return (
-        (rsi_line + level_lines)
-        .properties(height=180)
-        .configure_view(strokeWidth=0)
-        .configure(background="#05070d")
-    )
-
-
-def render_market_cards(snapshot: dict[str, Any], symbols: tuple[str, ...]) -> None:
-    st.subheader("Market telemetry")
-
-    cols = st.columns(2)
-
-    for i, sym in enumerate(symbols):
-        data = snapshot.get(sym, {})
-        price = data.get("price")
-        last_sig = data.get("last_signal")
-
-        if str(sym).upper().startswith("BOOM"):
-            bias = "BUY-only spike watch"
-            bias_class = "signal-good"
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**RSI (14)**")
+        rsi_series = feat["rsi_14"].dropna()
+        if not rsi_series.empty:
+            st.line_chart(rsi_series.to_frame(name="RSI"), height=220)
         else:
-            bias = "SELL-only drop watch"
-            bias_class = "signal-bad"
+            st.caption("RSI not ready yet.")
 
-        html = f"""
-        <div class="market-card">
-            <div style="display:flex;justify-content:space-between;align-items:center;">
-                <div>
-                    <div style="font-size:1.05rem;font-weight:800;">{sym}</div>
-                    <div class="{bias_class}">{bias}</div>
-                </div>
-                <div style="text-align:right;">
-                    <div class="small-muted">Last price</div>
-                    <div style="font-size:1.15rem;font-weight:800;">
-                        {f"{price:.5f}" if price is not None else "…"}
-                    </div>
-                </div>
-            </div>
-        """
+    with c2:
+        st.markdown("**MACD histogram**")
+        if "macd_hist" in feat.columns:
+            mh = feat["macd_hist"].dropna()
+            if not mh.empty:
+                st.bar_chart(mh.to_frame(name="hist"), height=220)
+            else:
+                st.caption("MACD not ready yet.")
+        else:
+            st.caption("MACD not available.")
 
-        if last_sig:
-            html += f"""
-            <hr style="border-color:#1f2a3d;">
-            <div class="small-muted">Latest alert</div>
-            <div>
-                <b>{last_sig.get("stage", "SIGNAL")}</b>
-                {last_sig.get("side", "")}
-                @ {float(last_sig.get("score", 0)):.1f}
-            </div>
-            <div class="small-muted">{last_sig.get("summary", "")}</div>
-            """
+    st.markdown("**ATR (14)**")
+    if "atr_14" in feat.columns:
+        atr = feat["atr_14"].dropna()
+        if not atr.empty:
+            st.line_chart(atr.to_frame(name="ATR"), height=180)
+    else:
+        st.caption("ATR not ready.")
 
-        note = data.get("risk_note")
-        if note:
-            html += f"""
-            <hr style="border-color:#1f2a3d;">
-            <div class="signal-warn">Risk note: {note}</div>
-            """
-
-        html += "</div>"
-
-        with cols[i % 2]:
-            st.markdown(html, unsafe_allow_html=True)
+    snap = (
+        f"**Latest bar** · O {last['open']:.5f} H {last['high']:.5f} "
+        f"L {last['low']:.5f} C {last['close']:.5f}"
+    )
+    if pd.notna(last.get("rsi_14")):
+        snap += f" · RSI {float(last['rsi_14']):.1f}"
+    st.caption(snap)
 
 
-# -----------------------------
-# Main app
-# -----------------------------
+def render_sparklines(db_path: Path, symbols: tuple[str, ...], bars: int, tf: str) -> None:
+    """Compact last-N closes for every symbol (quick overview)."""
+    st.markdown("**Quick price trail (all symbols)**")
+    cols = st.columns(min(3, len(symbols)) or 1)
+    for i, sym in enumerate(symbols):
+        df = load_candles(db_path, sym, tf, bars)
+        col = cols[i % len(cols)]
+        with col:
+            if df.empty:
+                st.caption(f"{sym}: no data")
+                continue
+            trail = df["close"].iloc[-bars:]
+            st.caption(sym)
+            st.line_chart(trail.to_frame(name="close"), height=140)
+
 
 def main() -> None:
     settings = get_settings()
-
-    st.set_page_config(
-        page_title="SCUBA 67 Signal Dashboard",
-        layout="wide",
-        initial_sidebar_state="expanded",
-    )
-
-    apply_dark_style()
-
-    st.title("Deriv Boom / Crash Signal Monitor")
-    st.caption("Signal-only dashboard · Boom BUY setups · Crash SELL setups")
+    st.set_page_config(page_title="Deriv Signal Dashboard", layout="wide")
+    st.title("Deriv Crash / Boom Signal Monitor")
+    st.caption("Live research view — refresh pulls from local SQLite snapshots.")
 
     db_path = Path(settings.data_db_path)
-
     if not db_path.exists():
         st.error("SQLite file not found — run main.py briefly to initialise storage.")
         st.stop()
@@ -682,158 +261,82 @@ def main() -> None:
     heartbeat = load_meta(db_path, "bot_heartbeat") or {}
     status = load_meta(db_path, "bot_status") or {}
 
+    cols = st.columns(3)
+    cols[0].metric("Tracked symbols", len(settings.symbols))
     hb = heartbeat.get("epoch")
-    last_msg = status.get("last_msg_epoch")
+    cols[1].metric(
+        "Last heartbeat age (s)",
+        f"{max(0.0, time.time() - float(hb)):.1f}" if hb else "n/a",
+    )
+    cols[2].metric("MODE", settings.mode)
 
     conn_state = (
         "connected"
-        if last_msg and (time.time() - float(last_msg)) < 60
-        else "idle / reconnecting"
+        if status.get("last_msg_epoch")
+        and (time.time() - float(status["last_msg_epoch"])) < 60
+        else "idle / awaiting ticks"
     )
-
-    top1, top2, top3, top4 = st.columns(4)
-
-    top1.metric("Tracked markets", len(settings.symbols))
-    top2.metric(
-        "WebSocket",
-        conn_state,
-    )
-    top3.metric(
-        "Heartbeat age",
-        f"{max(0.0, time.time() - float(hb)):.1f}s" if hb else "n/a",
-    )
-    top4.metric("Mode", settings.mode)
+    st.success(f"WebSocket ingest: **{conn_state}**")
 
     with st.sidebar:
-        st.header("Chart controls")
+        st.header("Charts")
+        chart_sym = st.selectbox("Symbol", list(settings.symbols), key="chart_sym")
+        chart_tf = st.selectbox("Timeframe", ("1m", "5m", "15m"), index=0, key="chart_tf")
+        chart_bars = st.slider("Bars to load", min_value=50, max_value=2000, value=400, step=50)
+        spark_bars = st.slider("Sparkline bars", 20, 200, 60, key="spark")
+        spark_tf = st.selectbox("Sparkline TF", ("1m", "5m", "15m"), index=0, key="spark_tf")
+        st.caption("Charts read from `candles` in SQLite; run `main.py` to populate.")
 
-        chart_sym = st.selectbox(
-            "Symbol",
-            list(settings.symbols),
-            key="chart_sym",
-        )
+    st.subheader("Charts (price & indicators)")
+    render_symbol_charts(db_path, chart_sym, chart_tf, chart_bars)
 
-        chart_tf = st.selectbox(
-            "Timeframe",
-            ("1m", "5m", "15m"),
-            index=0,
-            key="chart_tf",
-        )
+    render_sparklines(db_path, settings.symbols, spark_bars, spark_tf)
 
-        chart_bars = st.slider(
-            "Bars to load",
-            min_value=50,
-            max_value=2000,
-            value=400,
-            step=50,
-        )
-
-        outcome_days = st.slider(
-            "Outcome stats days",
-            min_value=1,
-            max_value=90,
-            value=30,
-            step=1,
-        )
-
-        st.caption("Signal markers are plotted from SQLite signal history.")
-
-    df = load_candles(db_path, chart_sym, chart_tf, chart_bars)
-
-    st.subheader(f"{chart_sym} · {chart_tf} chart")
-
-    if df.empty or len(df) < 5:
-        st.info(
-            f"No candle data yet for **{chart_sym}** · **{chart_tf}**. "
-            "Wait for the bot to accumulate bars."
-        )
-    else:
-        signal_df = load_chart_signals(
-            db_path=db_path,
-            symbol=chart_sym,
-            start_dt=df.index.min(),
-            end_dt=df.index.max(),
-        )
-
-        st.altair_chart(
-            build_candle_chart(df, signal_df),
-            width="stretch",
-        )
-
-        st.markdown("**RSI (14)**")
-        st.altair_chart(
-            build_rsi_chart(df),
-            width="stretch",
-        )
-
-        if not signal_df.empty:
-            st.caption(
-                f"Showing {len(signal_df)} signal marker(s) on this chart."
+    st.subheader("Per-symbol telemetry")
+    for sym in settings.symbols:
+        data = snapshot.get(sym, {})
+        c1, c2, c3, c4 = st.columns(4)
+        c1.markdown(f"**{sym}**")
+        price = data.get("price")
+        c2.metric("Latest price / last close", f"{price:.5f}" if price is not None else "…")
+        last_sig = data.get("last_signal")
+        if last_sig:
+            c3.markdown(
+                f"Last alert: `{last_sig.get('stage', 'SIGNAL')}` `{last_sig.get('side')}` "
+                f"@ {last_sig.get('score', 0):.1f} pts — {last_sig.get('summary', '')}",
             )
         else:
-            st.caption("No signals found inside the currently loaded chart range.")
+            c3.markdown("_No qualifying alert since restart / bar close._")
 
-    st.divider()
+        rsi = data.get("rsi")
+        macdh = data.get("macd_hist")
+        c4.markdown(f"{indicator_status(rsi, macdh)}")
 
-    totals, symbol_stats = load_outcome_stats(db_path, limit_days=outcome_days)
+        st.caption(
+            f"Trend: `{data.get('regime','n/a')}` — {ema_status(data.get('ema20'), data.get('ema50'), data.get('ema200'))}"
+            f"{(' · ' + str(data['regime_note'])) if data.get('regime_note') else ''}"
+        )
+        note = data.get("risk_note")
+        if note:
+            st.warning(f"Risk filter note for {sym}: {note}")
+
+        st.divider()
 
     st.subheader("Signal outcome tracking")
-
+    totals, symbol_stats = load_outcome_stats(db_path)
     s1, s2, s3, s4, s5 = st.columns(5)
-
-    s1.metric("Signals", totals.get("signals", 0))
+    s1.metric("Trigger signals", totals.get("trigger_signals", 0))
     s2.metric("Wins", totals.get("wins", 0))
     s3.metric("Losses", totals.get("losses", 0))
     s4.metric("Open", totals.get("open", 0))
-    s5.metric(
-        "Closed win rate",
-        f"{totals.get('win_rate_closed', 0) * 100:.1f}%",
-    )
-
+    s5.metric("Closed win rate", f"{totals.get('win_rate_closed', 0) * 100:.1f}%")
     if not symbol_stats.empty:
-        st.dataframe(symbol_stats, width="stretch")
+        st.dataframe(symbol_stats, use_container_width=True)
     else:
-        st.caption("No outcome stats yet. Signals will appear after TP/SL/expiry checks.")
-
-    st.divider()
-
-    render_market_cards(snapshot, settings.symbols)
-
-    st.divider()
+        st.caption("No resolved signal outcomes yet. The tracker will update after TP/SL/expiry.")
 
     st.subheader("Recent stored signals")
-
-    recent = load_recent_signals(db_path, limit=100)
-
-    if recent:
-        recent_df = pd.DataFrame(recent)
-
-        preferred_cols = [
-            "id",
-            "symbol",
-            "side",
-            "alert_stage",
-            "score",
-            "created_epoch",
-            "entry_zone_low",
-            "entry_zone_high",
-            "stop_loss",
-            "take_profit_1",
-            "take_profit_2",
-            "outcome_status",
-            "outcome_price",
-            "outcome_reason",
-        ]
-
-        cols = [c for c in preferred_cols if c in recent_df.columns]
-        remaining = [c for c in recent_df.columns if c not in cols]
-
-        st.dataframe(
-            recent_df[cols + remaining],
-            width="stretch",
-        )
-    else:
-        st.caption("No signals stored yet.")
+    st.dataframe(load_recent_signals(db_path), use_container_width=True)
 
     time.sleep(refresh)
     st.rerun()

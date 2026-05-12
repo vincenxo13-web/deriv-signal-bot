@@ -196,3 +196,22 @@ TRIGGER_TICK_VELOCITY_MIN=0.02
 ```
 
 Boom symbols still produce BUY-only alerts. Crash symbols still produce SELL-only alerts.
+
+## Latest TP/SL and outcome-stat update
+
+This build separates watchlist alerts from trade-quality alerts:
+
+- `PREP` alerts are saved as `WATCH_ONLY`. They still appear in Telegram/dashboard, but they are **not** counted in win/loss stats.
+- `TRIGGER` alerts are saved as `OPEN` and are the only alerts tracked for TP/SL/expiry outcomes.
+
+The TP/SL model is now configurable with Railway variables:
+
+```env
+ENTRY_ZONE_ATR_MULTIPLIER=0.12
+STOP_LOSS_ATR_MULTIPLIER=2.2
+TAKE_PROFIT_1_ATR_MULTIPLIER=3.0
+TAKE_PROFIT_2_ATR_MULTIPLIER=5.0
+MIN_RISK_REWARD=1.2
+```
+
+Compared with the earlier closer targets, these defaults push TP1/TP2 further away from entry and make outcome stats focus on confirmed `TRIGGER` alerts only.

@@ -57,6 +57,11 @@ class SignalEngine:
             trigger_min_score=self.settings.trigger_min_signal_score,
             trigger_spike_strength=self.settings.trigger_spike_strength,
             trigger_tick_velocity_min=self.settings.trigger_tick_velocity_min,
+            entry_zone_atr_multiplier=self.settings.entry_zone_atr_multiplier,
+            stop_loss_atr_multiplier=self.settings.stop_loss_atr_multiplier,
+            take_profit_1_atr_multiplier=self.settings.take_profit_1_atr_multiplier,
+            take_profit_2_atr_multiplier=self.settings.take_profit_2_atr_multiplier,
+            min_risk_reward=self.settings.min_risk_reward,
             preparation_alerts_enabled=self.settings.preparation_alerts_enabled,
             trigger_alerts_enabled=self.settings.trigger_alerts_enabled,
         )

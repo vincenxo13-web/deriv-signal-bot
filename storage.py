@@ -26,6 +26,7 @@ DB_PATH = DATA_DIR / "deriv_signals.db"
 
 
 OPEN_STATUS = "OPEN"
+WATCH_ONLY_STATUS = "WATCH_ONLY"
 
 
 def utc_now_iso() -> str:
@@ -123,6 +124,38 @@ class Storage:
             ON signals (symbol, outcome_status, created_epoch)
             """
         )
+        self._migrate_prep_signals_to_watch_only(conn)
+
+    def _migrate_prep_signals_to_watch_only(self, conn: sqlite3.Connection) -> None:
+        """Do not score old PREP/watchlist alerts as trade outcomes.
+
+        Earlier two-stage builds inserted PREP alerts as OPEN, so the outcome
+        tracker could incorrectly mark watch-only alerts as wins/losses.
+        """
+        rows = conn.execute(
+            """
+            SELECT id, payload_json
+            FROM signals
+            WHERE outcome_status = ?
+            """,
+            (OPEN_STATUS,),
+        ).fetchall()
+
+        prep_ids: list[int] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except json.JSONDecodeError:
+                continue
+            stage = str(payload.get("alert_stage", payload.get("stage", ""))).upper()
+            if stage == "PREP":
+                prep_ids.append(int(row["id"]))
+
+        for signal_id in prep_ids:
+            conn.execute(
+                "UPDATE signals SET outcome_status = ? WHERE id = ?",
+                (WATCH_ONLY_STATUS, signal_id),
+            )
 
     async def set_meta(self, key: str, value: Mapping[str, Any]) -> None:
         payload = json.dumps(dict(value))
@@ -216,6 +249,8 @@ class Storage:
         side = str(payload.pop("side"))
         score = float(payload.pop("score"))
         timeframe = str(payload.pop("timeframe"))
+        alert_stage = str(payload.get("alert_stage", payload.get("stage", ""))).upper()
+        initial_outcome_status = OPEN_STATUS if alert_stage == "TRIGGER" else WATCH_ONLY_STATUS
 
         async with self._lock:
 
@@ -236,7 +271,7 @@ class Storage:
                             timeframe,
                             json.dumps(payload),
                             created,
-                            OPEN_STATUS,
+                            initial_outcome_status,
                         ),
                     )
                     conn.commit()
@@ -392,6 +427,7 @@ class Storage:
                         SELECT symbol, side, outcome_status, COUNT(*) AS count
                         FROM signals
                         WHERE created_epoch >= ?
+                          AND outcome_status != 'WATCH_ONLY'
                         GROUP BY symbol, side, outcome_status
                         ORDER BY symbol ASC, side ASC, outcome_status ASC
                         """,

@@ -85,6 +85,13 @@ class Settings:
     trigger_spike_strength: float
     trigger_tick_velocity_min: float
 
+    # TP/SL model.
+    entry_zone_atr_multiplier: float
+    stop_loss_atr_multiplier: float
+    take_profit_1_atr_multiplier: float
+    take_profit_2_atr_multiplier: float
+    min_risk_reward: float
+
     # Signal outcome tracking.
     outcome_tracking_enabled: bool
     signal_expiry_minutes: int
@@ -147,6 +154,11 @@ def get_settings() -> Settings:
             trigger_min_signal_score=_float_env("TRIGGER_MIN_SIGNAL_SCORE", 78.0),
             trigger_spike_strength=_float_env("TRIGGER_SPIKE_STRENGTH", 1.0),
             trigger_tick_velocity_min=_float_env("TRIGGER_TICK_VELOCITY_MIN", 0.02),
+            entry_zone_atr_multiplier=max(0.05, _float_env("ENTRY_ZONE_ATR_MULTIPLIER", 0.12)),
+            stop_loss_atr_multiplier=max(0.5, _float_env("STOP_LOSS_ATR_MULTIPLIER", 2.2)),
+            take_profit_1_atr_multiplier=max(0.5, _float_env("TAKE_PROFIT_1_ATR_MULTIPLIER", 3.0)),
+            take_profit_2_atr_multiplier=max(0.5, _float_env("TAKE_PROFIT_2_ATR_MULTIPLIER", 5.0)),
+            min_risk_reward=max(0.1, _float_env("MIN_RISK_REWARD", 1.2)),
             outcome_tracking_enabled=_bool_env("OUTCOME_TRACKING_ENABLED", True),
             signal_expiry_minutes=max(5, _int_env("SIGNAL_EXPIRY_MINUTES", 180)),
             notify_signal_outcomes=_bool_env("NOTIFY_SIGNAL_OUTCOMES", True),

@@ -43,50 +43,56 @@ def risk_bucket_from_score(score: float) -> str:
 
 
 def format_signal_message(sig: Signal, tz_name: str = "Asia/Kuala_Lumpur") -> str:
-    local_time, utc_time = _fmt_time(sig.timestamp_epoch, tz_name)
-    stage = getattr(sig, "alert_stage", "PREP")
+    """Short, fast-to-read Telegram signal message."""
+    local_time, _ = _fmt_time(sig.timestamp_epoch, tz_name)
+    stage = str(getattr(sig, "alert_stage", "SIGNAL")).upper()
+    side = str(sig.side).upper()
+    symbol = str(sig.symbol).upper()
 
-    if stage == "TRIGGER":
-        arrow = "🟢" if sig.side == "BUY" else "🔴"
-        title = "BOOM SPIKE TRIGGER" if sig.side == "BUY" else "CRASH DROP TRIGGER"
-        stage_line = "Stage 2 / TRIGGER — spike confirmation is active"
-        action_hint = "Act only if your chart confirms entry. This can move fast."
+    if symbol.startswith("BOOM"):
+        icon = "🟢" if stage == "TRIGGER" else "🟡"
+    elif symbol.startswith("CRASH"):
+        icon = "🔴" if stage == "TRIGGER" else "🟡"
     else:
-        arrow = "🟡"
-        title = "BOOM BUY PREPARATION" if sig.side == "BUY" else "CRASH SELL PREPARATION"
-        stage_line = "Stage 1 / PREPARATION — setup is forming"
-        action_hint = "Open the chart and wait for confirmation before entering."
+        icon = "⚪"
 
-    reasons = sig.reasons[:7]
+    if stage == "PREP":
+        title = f"{icon} {symbol} {side} PREP / WATCH"
+        note = "Watch only — wait for trigger confirmation."
+    elif stage == "TRIGGER":
+        title = f"{icon} {symbol} {side} TRIGGER"
+        note = "Signal only — confirm before entering."
+    else:
+        title = f"{icon} {symbol} {side} SIGNAL"
+        note = "Signal only — confirm before entering."
+
+    reasons = sig.reasons[:4]
     reason_lines = "\n".join(f"• {html.escape(reason)}" for reason in reasons)
-    volatility = (
-        f"\n⚠️ <b>Volatility note:</b> {html.escape(sig.volatility_warning)}"
-        if sig.volatility_warning
-        else ""
+
+    volatility = ""
+    if sig.volatility_warning:
+        volatility = f"\nVolatility: {html.escape(sig.volatility_warning)}"
+
+    msg = (
+        f"<b>{html.escape(title)}</b> | <b>{sig.score:.0f}/100</b>\n\n"
+        f"Entry: <code>{_fmt_price(sig.entry_zone_low)} - {_fmt_price(sig.entry_zone_high)}</code>\n"
+        f"SL: <code>{_fmt_price(sig.stop_loss)}</code>\n"
+        f"TP1: <code>{_fmt_price(sig.take_profit_1)}</code> | "
+        f"TP2: <code>{_fmt_price(sig.take_profit_2)}</code>\n"
+        f"R:R: <b>{sig.risk_reward:.2f}:1</b>\n"
     )
 
-    return (
-        f"{arrow} <b>{html.escape(title)}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>Symbol:</b> <code>{html.escape(sig.symbol)}</code>\n"
-        f"<b>Action:</b> <b>{html.escape(sig.side)}</b> only\n"
-        f"<b>Score:</b> <b>{sig.score:.1f}/100</b> ({html.escape(risk_bucket_from_score(sig.score))})\n"
-        f"<b>Sent:</b> {html.escape(local_time)}\n"
-        f"<b>UTC:</b> {html.escape(utc_time)}\n\n"
-        f"🎯 <b>Sniper entry zone</b>\n"
-        f"<code>{_fmt_price(sig.entry_zone_low)} - {_fmt_price(sig.entry_zone_high)}</code>\n\n"
-        f"🛑 <b>Invalidation / SL idea:</b> <code>{_fmt_price(sig.stop_loss)}</code>\n"
-        f"✅ <b>TP1:</b> <code>{_fmt_price(sig.take_profit_1)}</code>\n"
-        f"✅ <b>TP2:</b> <code>{_fmt_price(sig.take_profit_2)}</code>\n"
-        f"📐 <b>Approx R:R:</b> {sig.risk_reward:.2f}:1\n\n"
-        f"📌 <b>Why this alert fired</b>\n"
-        f"{reason_lines}"
-        f"{volatility}\n\n"
-        f"📊 <b>Regime:</b> <code>{html.escape(sig.regime)}</code>\n"
-        f"⏱ <b>Timeframe:</b> {html.escape(sig.timeframe)}\n\n"
-        f"⚠️ Signal only — wait for your own confirmation before entering."
+    if reason_lines:
+        msg += f"\n<b>Why:</b>\n{reason_lines}\n"
+
+    msg += (
+        f"\nRegime: <code>{html.escape(str(sig.regime))}</code>"
+        f"{volatility}"
+        f"\nSent: <b>{html.escape(local_time)}</b>"
+        f"\n\n⚠️ {html.escape(note)}"
     )
 
+    return msg
 
 def format_outcome_message(event: dict, tz_name: str = "Asia/Kuala_Lumpur") -> str:
     status = str(event.get("outcome_status", "UNKNOWN"))

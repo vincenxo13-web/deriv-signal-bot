@@ -331,12 +331,12 @@ def main() -> None:
     s4.metric("Open", totals.get("open", 0))
     s5.metric("Closed win rate", f"{totals.get('win_rate_closed', 0) * 100:.1f}%")
     if not symbol_stats.empty:
-        st.dataframe(symbol_stats, use_container_width=True)
+        st.dataframe(symbol_stats, width="stretch")
     else:
         st.caption("No resolved signal outcomes yet. The tracker will update after TP/SL/expiry.")
 
     st.subheader("Recent stored signals")
-    st.dataframe(load_recent_signals(db_path), use_container_width=True)
+    st.dataframe(load_recent_signals(db_path), width="stretch")
 
     time.sleep(refresh)
     st.rerun()

@@ -23,6 +23,7 @@ import streamlit as st
 
 from config import get_settings
 from indicators import attach_core_indicators
+from ict_bpr import bpr_zones_for_dashboard
 
 
 # -----------------------------
@@ -505,7 +506,7 @@ def apply_dark_style() -> None:
 # Chart helpers
 # -----------------------------
 
-def build_candle_chart(df: pd.DataFrame, signal_df: pd.DataFrame) -> alt.Chart:
+def build_candle_chart(df: pd.DataFrame, signal_df: pd.DataFrame, bpr_df: pd.DataFrame | None = None) -> alt.Chart:
     chart_df = df.copy()
     chart_df = attach_core_indicators(chart_df)
     chart_df = chart_df.reset_index()
@@ -589,6 +590,30 @@ def build_candle_chart(df: pd.DataFrame, signal_df: pd.DataFrame) -> alt.Chart:
     )
 
     layers = [rule, candle, ema]
+
+    if bpr_df is not None and not bpr_df.empty:
+        bpr_band = (
+            alt.Chart(bpr_df)
+            .mark_rect(opacity=0.16)
+            .encode(
+                x=alt.value(0),
+                x2=alt.value(5000),
+                y="low:Q",
+                y2="high:Q",
+                color=alt.Color(
+                    "bias:N",
+                    scale=alt.Scale(domain=["bullish", "bearish"], range=["#00c853", "#ff5252"]),
+                    legend=alt.Legend(labelColor="#a8b3c7", titleColor="#a8b3c7"),
+                ),
+                tooltip=[
+                    alt.Tooltip("bias:N", title="H4 BPR"),
+                    alt.Tooltip("low:Q", title="Zone low", format=".5f"),
+                    alt.Tooltip("high:Q", title="Zone high", format=".5f"),
+                    alt.Tooltip("source:N", title="Source"),
+                ],
+            )
+        )
+        layers.insert(0, bpr_band)
 
     if not signal_df.empty:
         marker_colors = alt.Scale(
@@ -867,10 +892,19 @@ def main() -> None:
             end_dt=df.index.max(),
         )
 
+        bpr_zones = bpr_zones_for_dashboard(df, lookback_candles=getattr(settings, "ict_bpr_lookback_candles", 120))
+        bpr_df = pd.DataFrame(bpr_zones)
+
         st.altair_chart(
-            build_candle_chart(df, signal_df),
+            build_candle_chart(df, signal_df, bpr_df),
             width="stretch",
         )
+
+        if bpr_zones:
+            aligned_hint = "green = bullish BPR support context, red = bearish BPR resistance context"
+            st.caption(f"H4 BPR zones shown as shaded bands ({aligned_hint}).")
+        else:
+            st.caption("No H4 BPR zones detected in the currently loaded candle history yet.")
 
         st.markdown("**RSI (14)**")
         st.altair_chart(

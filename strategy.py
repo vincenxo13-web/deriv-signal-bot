@@ -32,6 +32,8 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
+from ict_bpr import bpr_context_for_signal
+
 from indicators import (
     attach_core_indicators,
     bollinger_bandwidth,
@@ -71,6 +73,8 @@ class Signal:
     regime: str
     timestamp_epoch: float
     alert_stage: AlertStage = "PREP"
+    bpr_context: dict[str, Any] | None = None
+    features: dict[str, Any] | None = None
 
 
 def signal_to_storage_row(sig: Signal) -> dict[str, Any]:
@@ -549,6 +553,11 @@ def evaluate_signal(
     min_risk_reward: float = 1.4,
     require_micro_break_for_trigger: bool = True,
     micro_break_lookback: int = 3,
+    ict_bpr_enabled: bool = True,
+    ict_bpr_lookback_candles: int = 120,
+    ict_bpr_score_bonus: float = 8.0,
+    ict_bpr_require_for_trigger: bool = False,
+    ict_bpr_max_distance_atr: float = 1.5,
     **extra_kwargs: Any,
 ) -> Signal | None:
     """
@@ -565,6 +574,13 @@ def evaluate_signal(
     # while config uses signal_warmup_bars. Prefer warmup_bars if supplied.
     effective_warmup_bars = warmup_bars if warmup_bars is not None else signal_warmup_bars
     warmup = max(60, int(effective_warmup_bars))
+
+    # Compatibility with older SignalEngine keyword name.
+    if "trigger_min_score" in extra_kwargs and "trigger_min_signal_score" not in extra_kwargs:
+        try:
+            trigger_min_signal_score = float(extra_kwargs["trigger_min_score"])
+        except (TypeError, ValueError):
+            pass
 
     if df_1m.empty or len(df_1m) < warmup:
         return None
@@ -658,6 +674,23 @@ def evaluate_signal(
     score += vol_pts
     reasons.extend(vol_notes)
 
+    bpr_ctx = bpr_context_for_signal(
+        df_1m=df1[["open", "high", "low", "close"]],
+        side=side,
+        price=last_close,
+        atr=atr,
+        enabled=ict_bpr_enabled,
+        lookback_candles=ict_bpr_lookback_candles,
+        max_distance_atr=ict_bpr_max_distance_atr,
+    )
+    bpr_dict = bpr_ctx.to_dict()
+    if bpr_ctx.aligned:
+        bonus = float(ict_bpr_score_bonus)
+        score += bonus
+        reasons.append(f"H4 BPR aligned: {bpr_ctx.note}")
+    elif bpr_ctx.status in {"NEAR", "FAR", "NO_ZONE"}:
+        reasons.append(f"H4 BPR not aligned: {bpr_ctx.note}")
+
     micro_ok, micro_note = _micro_break_confirmed(df1, side, lookback=micro_break_lookback)
 
     if micro_ok:
@@ -687,6 +720,7 @@ def evaluate_signal(
         and score >= float(trigger_min_signal_score)
         and spike_pressure_confirmed
         and (micro_ok or not require_micro_break_for_trigger)
+        and (bpr_ctx.aligned or not ict_bpr_require_for_trigger)
     )
 
     if trigger_confirmed:
@@ -721,4 +755,29 @@ def evaluate_signal(
         regime=regime,
         timestamp_epoch=float(now_epoch),
         alert_stage=stage,
+        bpr_context=bpr_dict,
+        features={
+            "symbol": symbol,
+            "side": side,
+            "alert_stage": stage,
+            "score": score,
+            "rsi_14": rsi,
+            "atr_14": atr,
+            "macd_hist": _safe_float(row.get("macd_hist"), 0.0),
+            "ema_20": _safe_float(row.get("ema_20"), 0.0),
+            "ema_50": _safe_float(row.get("ema_50"), 0.0),
+            "ema_200": _safe_float(row.get("ema_200"), 0.0),
+            "spike_strength": float(spike_ctx.spike_strength or 0.0),
+            "tick_velocity": float(spike_ctx.tick_velocity or 0.0),
+            "spike_direction": str(spike_ctx.spike_direction or "none"),
+            "micro_break_confirmed": bool(micro_ok),
+            "risk_reward": rr,
+            "regime": regime,
+            "bpr_status": bpr_ctx.status,
+            "bpr_aligned": bool(bpr_ctx.aligned),
+            "bpr_bias": bpr_ctx.bias,
+            "bpr_distance_atr": bpr_ctx.distance_atr,
+            "bpr_zone_low": bpr_ctx.zone_low,
+            "bpr_zone_high": bpr_ctx.zone_high,
+        },
     )

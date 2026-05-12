@@ -242,3 +242,38 @@ Suggested rollout:
 - 50-200 resolved TRIGGER rows: inspect statistics only.
 - 200+ resolved TRIGGER rows: begin offline ML experiments.
 - 500+ resolved TRIGGER rows: consider enabling an ML probability filter in a later build.
+
+## ICT H4 BPR context filter
+
+This build adds a lightweight ICT Balanced Price Range (BPR) context layer.
+The bot resamples stored 1-minute candles into H4 candles, detects simple Fair
+Value Gaps, finds overlaps between opposing FVGs, and reports whether the signal
+is aligned with the correct H4 BPR context.
+
+Telegram signals now include a short H4 BPR line:
+
+- `H4 BPR: ✅ ALIGNED` means price is inside or near the correct H4 BPR side.
+- `H4 BPR: ⚠️ NEAR/NO_ZONE` means the context is not perfect but not a hard block.
+- `H4 BPR: ❌ FAR` means price is too far from the nearest correct BPR zone.
+
+Dashboard charts also shade detected H4 BPR zones:
+
+- Green shaded zone = bullish H4 BPR, useful context for Boom BUY setups.
+- Red shaded zone = bearish H4 BPR, useful context for Crash SELL setups.
+
+Railway variables:
+
+```env
+ICT_BPR_ENABLED=true
+ICT_BPR_LOOKBACK_CANDLES=120
+ICT_BPR_SCORE_BONUS=8
+ICT_BPR_REQUIRE_FOR_TRIGGER=false
+ICT_BPR_MAX_DISTANCE_ATR=1.5
+```
+
+Recommended rollout:
+
+1. Keep `ICT_BPR_REQUIRE_FOR_TRIGGER=false` first.
+2. Let outcome tracking and ML feature logging collect data with BPR fields.
+3. Later, compare win rate for `bpr_aligned=true` vs `bpr_aligned=false`.
+4. Only make BPR mandatory if your data proves it improves results.

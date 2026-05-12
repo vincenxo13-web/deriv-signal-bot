@@ -82,10 +82,40 @@ def format_signal_message(sig: Signal, tz_name: str = "Asia/Kuala_Lumpur") -> st
         f"R:R: <b>{sig.risk_reward:.2f}:1</b>\n"
     )
 
+    bpr_line = ""
+    bpr = getattr(sig, "bpr_context", None) or {}
+    if isinstance(bpr, dict) and bpr:
+        status = str(bpr.get("status", "UNKNOWN")).upper()
+        if bool(bpr.get("aligned")):
+            bpr_icon = "✅"
+        elif status in {"NEAR", "NO_ZONE"}:
+            bpr_icon = "⚠️"
+        elif status == "OFF":
+            bpr_icon = "➖"
+        else:
+            bpr_icon = "❌"
+        zone_low = bpr.get("zone_low")
+        zone_high = bpr.get("zone_high")
+        distance = bpr.get("distance_atr")
+        zone_text = ""
+        if zone_low is not None and zone_high is not None:
+            try:
+                zone_text = f" | Zone: <code>{_fmt_price(float(zone_low))}-{_fmt_price(float(zone_high))}</code>"
+            except (TypeError, ValueError):
+                zone_text = ""
+        dist_text = ""
+        if distance is not None:
+            try:
+                dist_text = f" | Dist: {float(distance):.2f} ATR"
+            except (TypeError, ValueError):
+                dist_text = ""
+        bpr_line = f"\nH4 BPR: {bpr_icon} <b>{html.escape(status)}</b>{zone_text}{dist_text}"
+
     if reason_lines:
         msg += f"\n<b>Why:</b>\n{reason_lines}\n"
 
     msg += (
+        f"{bpr_line}"
         f"\nRegime: <code>{html.escape(str(sig.regime))}</code>"
         f"{volatility}"
         f"\nSent: <b>{html.escape(local_time)}</b>"

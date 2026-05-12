@@ -64,6 +64,11 @@ class SignalEngine:
             min_risk_reward=self.settings.min_risk_reward,
             preparation_alerts_enabled=self.settings.preparation_alerts_enabled,
             trigger_alerts_enabled=self.settings.trigger_alerts_enabled,
+            ict_bpr_enabled=self.settings.ict_bpr_enabled,
+            ict_bpr_lookback_candles=self.settings.ict_bpr_lookback_candles,
+            ict_bpr_score_bonus=self.settings.ict_bpr_score_bonus,
+            ict_bpr_require_for_trigger=self.settings.ict_bpr_require_for_trigger,
+            ict_bpr_max_distance_atr=self.settings.ict_bpr_max_distance_atr,
         )
         if sig is None:
             await self._publish_snapshot(symbol, df_feat, None, spike_ctx)

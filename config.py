@@ -101,6 +101,13 @@ class Settings:
     ml_feature_logging_enabled: bool
     ml_training_min_samples: int
 
+    # ICT H4 Balanced Price Range context.
+    ict_bpr_enabled: bool
+    ict_bpr_lookback_candles: int
+    ict_bpr_score_bonus: float
+    ict_bpr_require_for_trigger: bool
+    ict_bpr_max_distance_atr: float
+
     # Stream/storage.
     tick_sample_seconds: int
     data_db_path: Path
@@ -168,6 +175,11 @@ def get_settings() -> Settings:
             notify_signal_outcomes=_bool_env("NOTIFY_SIGNAL_OUTCOMES", True),
             ml_feature_logging_enabled=_bool_env("ML_FEATURE_LOGGING_ENABLED", True),
             ml_training_min_samples=max(20, _int_env("ML_TRAINING_MIN_SAMPLES", 200)),
+            ict_bpr_enabled=_bool_env("ICT_BPR_ENABLED", True),
+            ict_bpr_lookback_candles=max(20, _int_env("ICT_BPR_LOOKBACK_CANDLES", 120)),
+            ict_bpr_score_bonus=max(0.0, _float_env("ICT_BPR_SCORE_BONUS", 8.0)),
+            ict_bpr_require_for_trigger=_bool_env("ICT_BPR_REQUIRE_FOR_TRIGGER", False),
+            ict_bpr_max_distance_atr=max(0.1, _float_env("ICT_BPR_MAX_DISTANCE_ATR", 1.5)),
             tick_sample_seconds=max(0, _int_env("TICK_SAMPLE_SECONDS", 2)),
             data_db_path=db_path,
             dashboard_refresh_seconds=max(1, _int_env("DASHBOARD_REFRESH_SECONDS", 2)),

@@ -103,6 +103,8 @@ async def runner(validate_only: bool) -> None:
         on_bar_closed=engine.on_bar_closed,
     )
 
+    await router.warm_start_from_storage()
+
     client = DerivWebSocketClient(settings)
 
     async def handle_message(msg: dict) -> None:

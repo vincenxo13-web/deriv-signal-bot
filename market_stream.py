@@ -190,6 +190,51 @@ class MarketStreamRouter:
             sym: SymbolRuntime(sym, self.settings) for sym in self.settings.symbols
         }
 
+
+    async def warm_start_from_storage(self) -> None:
+        """
+        Load saved 1m candles from SQLite into memory after Railway redeploy.
+
+        This avoids waiting for SIGNAL_WARMUP_BARS fresh candles when the
+        persistent Railway volume already contains enough candle history.
+        """
+        warmup_bars = int(getattr(self.settings, "signal_warmup_bars", 180))
+        load_limit = max(warmup_bars + 80, 300)
+
+        for symbol, runtime in self.symbols.items():
+            try:
+                rows = await self.storage.load_recent_candles(
+                    symbol=symbol,
+                    timeframe="1m",
+                    limit=load_limit,
+                )
+
+                if not rows:
+                    logger.info("Warm-start: no saved 1m candles for %s", symbol)
+                    continue
+
+                runtime.bars_1m.clear()
+
+                for row in rows:
+                    runtime.bars_1m.append(
+                        CompletedBar(
+                            bucket_epoch=float(row["bucket_epoch"]),
+                            open=float(row["open"]),
+                            high=float(row["high"]),
+                            low=float(row["low"]),
+                            close=float(row["close"]),
+                        )
+                    )
+
+                logger.info(
+                    "Warm-start loaded %s saved 1m candles for %s",
+                    len(runtime.bars_1m),
+                    symbol,
+                )
+
+            except Exception:
+                logger.exception("Warm-start failed for %s", symbol)
+
     def _resolve_symbol(self, tick: dict[str, Any]) -> str | None:
         raw = tick.get("symbol")
         if not raw:

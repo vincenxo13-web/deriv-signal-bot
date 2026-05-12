@@ -241,6 +241,41 @@ class Storage:
 
             await asyncio.to_thread(_write)
 
+
+    async def load_recent_candles(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+        limit: int = 300,
+    ) -> list[dict[str, float]]:
+        """
+        Load recent saved candles from SQLite for warm-start after redeploy.
+
+        Returns candles oldest-first so MarketStreamRouter can append them
+        directly into each symbol runtime deque.
+        """
+        async with self._lock:
+
+            def _read() -> list[dict[str, float]]:
+                with self._connect() as conn:
+                    rows = conn.execute(
+                        """
+                        SELECT bucket_epoch, open, high, low, close
+                        FROM candles
+                        WHERE UPPER(symbol) = UPPER(?)
+                          AND timeframe = ?
+                        ORDER BY bucket_epoch DESC
+                        LIMIT ?
+                        """,
+                        (symbol, timeframe, limit),
+                    ).fetchall()
+
+                    candles = [dict(row) for row in rows]
+                    candles.reverse()
+                    return candles
+
+            return await asyncio.to_thread(_read)
+
     async def insert_signal_record(self, record: Mapping[str, Any]) -> int:
         payload = dict(record)
 

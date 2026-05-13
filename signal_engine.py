@@ -41,6 +41,11 @@ class SignalEngine:
         df_1m: pd.DataFrame,
         spike_ctx: SpikeContext,
     ) -> None:
+        if df_1m.empty:
+            return
+
+        await self._track_outcomes(symbol, df_1m)
+
         df_feat = attach_core_indicators(df_1m)
         sig = evaluate_signal(
             symbol=symbol,
@@ -48,10 +53,8 @@ class SignalEngine:
             spike_ctx=spike_ctx,
             min_score=self.settings.min_signal_score,
             now_epoch=time.time(),
-            signal_warmup_bars=self.settings.signal_warmup_bars,
-            preparation_alerts_enabled=self.settings.preparation_alerts_enabled,
-            trigger_alerts_enabled=self.settings.trigger_alerts_enabled,
-            trigger_min_signal_score=self.settings.trigger_min_signal_score,
+            warmup_bars=self.settings.signal_warmup_bars,
+            trigger_min_score=self.settings.trigger_min_signal_score,
             trigger_spike_strength=self.settings.trigger_spike_strength,
             trigger_tick_velocity_min=self.settings.trigger_tick_velocity_min,
             entry_zone_atr_multiplier=self.settings.entry_zone_atr_multiplier,
@@ -59,17 +62,8 @@ class SignalEngine:
             take_profit_1_atr_multiplier=self.settings.take_profit_1_atr_multiplier,
             take_profit_2_atr_multiplier=self.settings.take_profit_2_atr_multiplier,
             min_risk_reward=self.settings.min_risk_reward,
-            ict_bpr_enabled=self.settings.ict_bpr_enabled,
-            ict_bpr_lookback_candles=self.settings.ict_bpr_lookback_candles,
-            ict_bpr_score_bonus=self.settings.ict_bpr_score_bonus,
-            ict_bpr_require_for_trigger=self.settings.ict_bpr_require_for_trigger,
-            ict_bpr_max_distance_atr=self.settings.ict_bpr_max_distance_atr,
-            trend_following_spike_mode=self.settings.trend_following_spike_mode,
-            require_trend_alignment=self.settings.require_trend_alignment,
-            stoch_enabled=self.settings.stoch_enabled,
-            require_stoch_for_trigger=self.settings.require_stoch_for_trigger,
-            stoch_oversold=self.settings.stoch_oversold,
-            stoch_overbought=self.settings.stoch_overbought,
+            preparation_alerts_enabled=self.settings.preparation_alerts_enabled,
+            trigger_alerts_enabled=self.settings.trigger_alerts_enabled,
         )
         if sig is None:
             await self._publish_snapshot(symbol, df_feat, None, spike_ctx)
@@ -88,11 +82,43 @@ class SignalEngine:
             return
 
         row = signal_to_storage_row(sig)
-        await self.storage.insert_signal_record(row)
-        self.risk.observe_signal_sent(symbol)
+        signal_id = await self.storage.insert_signal_record(row)
+
+        if self.settings.ml_feature_logging_enabled:
+            await self.storage.insert_signal_features(
+                signal_id=signal_id,
+                symbol=sig.symbol,
+                side=sig.side,
+                alert_stage=sig.alert_stage,
+                score=sig.score,
+                features=sig.features,
+                created_epoch=sig.timestamp_epoch,
+            )
+
+        self.risk.observe_signal_sent(symbol, stage=sig.alert_stage)
 
         await self.notifier.broadcast(sig)
         await self._publish_snapshot(symbol, df_feat, sig, spike_ctx)
+
+    async def _track_outcomes(self, symbol: str, df_1m: pd.DataFrame) -> None:
+        """Resolve previously sent signals when TP/SL/expiry is reached."""
+        if not self.settings.outcome_tracking_enabled or df_1m.empty:
+            return
+
+        last = df_1m.iloc[-1]
+        candle_epoch = float(df_1m.index[-1].timestamp())
+        events = await self.storage.evaluate_open_signal_outcomes(
+            symbol=symbol,
+            candle_epoch=candle_epoch,
+            high=float(last["high"]),
+            low=float(last["low"]),
+            close=float(last["close"]),
+            expiry_minutes=self.settings.signal_expiry_minutes,
+        )
+
+        if events:
+            logger.info("Resolved %s signal outcome(s) for %s", len(events), symbol)
+            await self.notifier.broadcast_outcomes(events)
 
 
     async def _publish_snapshot(
@@ -123,8 +149,6 @@ class SignalEngine:
         sym_state: dict[str, Any] = {
             "price": _num("close"),
             "rsi": _num("rsi_14"),
-            "stoch_k": _num("stoch_k"),
-            "stoch_d": _num("stoch_d"),
             "macd_hist": _num("macd_hist"),
             "ema20": _num("ema_20"),
             "ema50": _num("ema_50"),
@@ -138,9 +162,9 @@ class SignalEngine:
         if sig is not None:
             sym_state["last_signal"] = {
                 "side": sig.side,
+                "stage": sig.alert_stage,
                 "score": sig.score,
                 "timestamp": sig.timestamp_epoch,
-                "stage": sig.alert_stage,
                 "summary": "; ".join(sig.reasons[:3]),
             }
         elif extra_note:

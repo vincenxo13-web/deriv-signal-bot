@@ -51,6 +51,29 @@ class Notifier:
     def __init__(self, settings) -> None:
         self.settings = settings
 
+    async def send_text(self, text: str) -> None:
+        """Send a plain text message to Telegram and log it.
+
+        Used for startup/status messages that are not tied to a Signal object.
+        """
+        logger.info("NOTIFY\n%s", text)
+
+        if self.settings.telegram_bot_token and self.settings.telegram_chat_id:
+            await self._send_telegram(text)
+
+    async def send_startup_message(self) -> None:
+        """Send a startup message so Telegram connectivity is confirmed after deploy."""
+        symbols = ", ".join(getattr(self.settings, "symbols", ()) or ())
+        text = (
+            "✅ Deriv Signal Bot started\n"
+            "Mode: TELEGRAM SIGNALS ONLY\n"
+            "Boom = BUY only\n"
+            "Crash = SELL only"
+        )
+        if symbols:
+            text += f"\nTracking: {symbols}"
+        await self.send_text(text)
+
     async def broadcast(self, sig: Signal) -> None:
         text = format_signal_message(sig, risk_bucket_from_score(sig.score))
         logger.info("SIGNAL\n%s", text)

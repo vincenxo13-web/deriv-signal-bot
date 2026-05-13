@@ -227,3 +227,15 @@ def execution_allowed(settings: Settings) -> tuple[bool, str]:
     if settings.deriv_real_trading_confirm != expected:
         return False, "DERIV_REAL_TRADING_CONFIRM missing."
     return True, "Execution checks passed."
+
+def get_data_dir() -> Path:
+    """Return the persistent data directory used for SQLite + logs.
+
+    Railway should set DATA_DIR=/app/data. Locally, this falls back to
+    the project data/ folder.
+    """
+    raw = os.getenv("DATA_DIR")
+    if raw and raw.strip():
+        return Path(raw).expanduser().resolve()
+    return (_project_root() / "data").resolve()
+

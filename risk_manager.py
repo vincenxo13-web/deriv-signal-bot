@@ -89,7 +89,9 @@ class RiskManager:
             ):
                 spike_direction = str(getattr(spike_ctx, "spike_direction", "none") or "none").lower()
                 target_direction = "up" if str(signal.side).upper() == "BUY" else "down"
-                is_trigger = str(stage).upper() == "TRIGGER"
+                stage = getattr(signal, "alert_stage", getattr(signal, "stage", "SIGNAL"))
+                stage = str(stage).upper()
+                is_trigger = stage == "TRIGGER"
 
                 # We are building a spike-catching signal bot:
                 # - Boom BUY wants the upward spike.

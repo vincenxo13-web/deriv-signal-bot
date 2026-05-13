@@ -10,7 +10,7 @@ from typing import Any
 
 import pandas as pd
 
-from config import Settings, execution_allowed, get_settings
+from config import Settings, get_settings
 from indicators import attach_core_indicators, classify_regime
 from notifier import Notifier
 from risk_manager import RiskManager
@@ -72,15 +72,6 @@ class SignalEngine:
         await self.notifier.broadcast(sig)
         await self._publish_snapshot(symbol, df_feat, sig, spike_ctx)
 
-        ok_exec, exec_reason = execution_allowed(self.settings)
-        if self.settings.enable_real_trading:
-            logger.warning(
-                "ENABLE_REAL_TRADING is true — execution guard state: %s (%s). "
-                "Automatic order placement is NOT wired in this signal-first build.",
-                ok_exec,
-                exec_reason,
-            )
-
     async def _publish_snapshot(
         self,
         symbol: str,
@@ -122,6 +113,7 @@ class SignalEngine:
         if sig is not None:
             sym_state["last_signal"] = {
                 "side": sig.side,
+                "stage": getattr(sig, "alert_stage", "TRIGGER"),
                 "score": sig.score,
                 "timestamp": sig.timestamp_epoch,
                 "summary": "; ".join(sig.reasons[:3]),

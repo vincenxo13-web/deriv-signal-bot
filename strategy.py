@@ -149,6 +149,113 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+
+def _stochastic_timing_score(
+    df: pd.DataFrame,
+    side: Side,
+    oversold: float = 20.0,
+    overbought: float = 80.0,
+) -> tuple[float, str | None, bool]:
+    """Score stochastic timing for trend-following spike entries.
+
+    Boom BUY: prefer stochastic oversold / recovering from below 20.
+    Crash SELL: prefer stochastic overbought / rolling down from above 80.
+    The boolean return is the stricter trigger-quality confirmation.
+    """
+    if len(df) < 5 or not {"stoch_k", "stoch_d"}.issubset(df.columns):
+        return 0.0, None, False
+
+    k = _safe_float(df["stoch_k"].iloc[-1], np.nan)
+    d = _safe_float(df["stoch_d"].iloc[-1], np.nan)
+    pk = _safe_float(df["stoch_k"].iloc[-2], np.nan)
+    pd_ = _safe_float(df["stoch_d"].iloc[-2], np.nan)
+    if any(np.isnan(v) for v in (k, d, pk, pd_)):
+        return 0.0, None, False
+
+    if side == "BUY":
+        cross_up = pk <= pd_ and k > d
+        rising = k > pk and d >= pd_
+        deep_oversold = min(k, d) <= oversold
+        recovering_from_oversold = k <= oversold + 15 and (cross_up or rising)
+        if deep_oversold and (cross_up or rising):
+            return 18.0, f"Stochastic BUY timing: oversold recovery (%K {k:.1f}, %D {d:.1f})", True
+        if recovering_from_oversold:
+            return 14.0, f"Stochastic BUY timing: recovering near oversold (%K {k:.1f})", True
+        if deep_oversold:
+            return 8.0, f"Stochastic is oversold for Boom pullback (%K {k:.1f})", False
+        return -8.0, f"Stochastic not in Boom buy zone (%K {k:.1f})", False
+
+    cross_down = pk >= pd_ and k < d
+    falling = k < pk and d <= pd_
+    deep_overbought = max(k, d) >= overbought
+    rejecting_from_overbought = k >= overbought - 15 and (cross_down or falling)
+    if deep_overbought and (cross_down or falling):
+        return 18.0, f"Stochastic SELL timing: overbought rejection (%K {k:.1f}, %D {d:.1f})", True
+    if rejecting_from_overbought:
+        return 14.0, f"Stochastic SELL timing: rolling over near overbought (%K {k:.1f})", True
+    if deep_overbought:
+        return 8.0, f"Stochastic is overbought for Crash pull-up (%K {k:.1f})", False
+    return -8.0, f"Stochastic not in Crash sell zone (%K {k:.1f})", False
+
+
+def _trend_pullback_context(
+    df: pd.DataFrame,
+    side: Side,
+    atr: float,
+) -> tuple[float, list[str], bool, bool]:
+    """Trend-following spike model.
+
+    Crash: downtrend + pull-up into EMA/Bollinger premium.
+    Boom: uptrend + pull-down into EMA/Bollinger discount.
+    """
+    if len(df) < 60:
+        return 0.0, [], False, False
+    row = df.iloc[-1]
+    close = float(row["close"])
+    ema20 = _safe_float(row.get("ema_20"), np.nan)
+    ema50 = _safe_float(row.get("ema_50"), np.nan)
+    ema200 = _safe_float(row.get("ema_200"), np.nan)
+    bb_mid = _safe_float(row.get("bb_mid"), np.nan)
+    bb_upper = _safe_float(row.get("bb_upper"), np.nan)
+    bb_lower = _safe_float(row.get("bb_lower"), np.nan)
+
+    notes: list[str] = []
+    pts = 0.0
+    if side == "BUY":
+        trend_ok = bool((ema50 >= ema200 and close >= ema200) or (ema20 >= ema50 and close >= ema50))
+        pullback_ok = bool(
+            close <= ema20 + atr * 0.65
+            or close <= ema50 + atr * 0.65
+            or (not np.isnan(bb_lower) and close <= bb_mid)
+        )
+        if trend_ok:
+            pts += 16.0
+            notes.append("Boom trend model: uptrend bias is present")
+        if pullback_ok:
+            pts += 14.0
+            notes.append("Boom trend model: pull-down/retracement zone")
+        if not trend_ok:
+            pts -= 18.0
+            notes.append("Boom trend model: no clean uptrend; avoid buying drift")
+    else:
+        trend_ok = bool((ema50 <= ema200 and close <= ema200) or (ema20 <= ema50 and close <= ema50))
+        pullback_ok = bool(
+            close >= ema20 - atr * 0.65
+            or close >= ema50 - atr * 0.65
+            or (not np.isnan(bb_upper) and close >= bb_mid)
+        )
+        if trend_ok:
+            pts += 16.0
+            notes.append("Crash trend model: downtrend bias is present")
+        if pullback_ok:
+            pts += 14.0
+            notes.append("Crash trend model: pull-up/retracement zone")
+        if not trend_ok:
+            pts -= 18.0
+            notes.append("Crash trend model: no clean downtrend; avoid selling drift")
+    return pts, notes, trend_ok, pullback_ok
+
+
 def _rsi_score(side: Side, rsi: float) -> tuple[float, str | None]:
     if np.isnan(rsi):
         return 0.0, None
@@ -558,6 +665,12 @@ def evaluate_signal(
     ict_bpr_score_bonus: float = 5.0,
     ict_bpr_require_for_trigger: bool = False,
     ict_bpr_max_distance_atr: float = 2.0,
+    trend_following_spike_mode: bool = True,
+    require_trend_alignment: bool = True,
+    stoch_enabled: bool = True,
+    require_stoch_for_trigger: bool = True,
+    stoch_oversold: float = 20.0,
+    stoch_overbought: float = 80.0,
     **extra_kwargs: Any,
 ) -> Signal | None:
     """
@@ -598,6 +711,8 @@ def evaluate_signal(
     last_close = float(row["close"])
     atr = max(float(row["atr_14"]), 1e-9)
     rsi = float(row["rsi_14"])
+    stoch_k = _safe_float(row.get("stoch_k"), np.nan)
+    stoch_d = _safe_float(row.get("stoch_d"), np.nan)
 
     regime, vol_note = classify_regime(df1)
     zones = detect_sr_zones(df1)
@@ -609,10 +724,29 @@ def evaluate_signal(
     score += pts
     reasons.extend(notes)
 
+    trend_model_aligned = True
+    pullback_model_ok = True
+    if trend_following_spike_mode:
+        pts, notes, trend_model_aligned, pullback_model_ok = _trend_pullback_context(df1, side, atr)
+        score += pts
+        reasons.extend(notes)
+
     pts, note = _rsi_score(side, rsi)
     score += pts
     if note:
         reasons.append(note)
+
+    stoch_trigger_ok = True
+    if stoch_enabled:
+        pts, note, stoch_trigger_ok = _stochastic_timing_score(
+            df1,
+            side,
+            oversold=stoch_oversold,
+            overbought=stoch_overbought,
+        )
+        score += pts
+        if note:
+            reasons.append(note)
 
     if "macd_hist" in df1.columns:
         pts, note = _macd_score(df1["macd_hist"], side)
@@ -721,10 +855,18 @@ def evaluate_signal(
     # - Best trigger: micro-break in the target direction.
     # - Still acceptable: target spike pressure + wick rejection/drift exhaustion.
     # This avoids endless PREP alerts while still stopping very early blind entries.
+    trend_ok_for_trigger = bool(
+        (not trend_following_spike_mode)
+        or (not require_trend_alignment)
+        or (trend_model_aligned and pullback_model_ok)
+    )
+    stoch_ok_for_trigger = bool((not stoch_enabled) or (not require_stoch_for_trigger) or stoch_trigger_ok)
+
     strong_price_action_confirmed = bool(
         micro_ok
         or (spike_pressure_confirmed and wick_rejection_confirmed)
         or (spike_pressure_confirmed and drift_exhaustion_confirmed)
+        or (spike_pressure_confirmed and stoch_trigger_ok and trend_ok_for_trigger)
     )
 
     bpr_ok_for_trigger = bool(bpr_ctx.aligned or not ict_bpr_require_for_trigger)
@@ -734,6 +876,8 @@ def evaluate_signal(
         and score >= float(trigger_min_signal_score)
         and strong_price_action_confirmed
         and bpr_ok_for_trigger
+        and trend_ok_for_trigger
+        and stoch_ok_for_trigger
     )
 
     if trigger_confirmed:
@@ -744,6 +888,10 @@ def evaluate_signal(
             reasons.insert(0, "Trigger confirmed by rejection candle + target spike pressure")
         elif drift_exhaustion_confirmed:
             reasons.insert(0, "Trigger confirmed by drift exhaustion + target spike pressure")
+        elif stoch_trigger_ok and spike_pressure_confirmed:
+            reasons.insert(0, "Trigger confirmed by stochastic timing + target spike pressure")
+        if trend_following_spike_mode:
+            reasons.insert(0, "Trend-following spike model confirmed")
     elif preparation_alerts_enabled and score >= max(float(min_score), float(trigger_min_signal_score) - 6.0):
         # PREP is intentionally stricter now. It is watch-only and should not be spammy.
         stage = "PREP"
@@ -782,6 +930,11 @@ def evaluate_signal(
             "alert_stage": stage,
             "score": score,
             "rsi_14": rsi,
+            "stoch_k": stoch_k,
+            "stoch_d": stoch_d,
+            "stoch_trigger_ok": bool(stoch_trigger_ok),
+            "trend_model_aligned": bool(trend_model_aligned),
+            "pullback_model_ok": bool(pullback_model_ok),
             "atr_14": atr,
             "macd_hist": _safe_float(row.get("macd_hist"), 0.0),
             "ema_20": _safe_float(row.get("ema_20"), 0.0),

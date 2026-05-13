@@ -55,6 +55,30 @@ def _atr_wilder(df: pd.DataFrame, length: int = 14) -> pd.Series:
     return atr
 
 
+
+def _stochastic_oscillator(
+    df: pd.DataFrame,
+    k_period: int = 14,
+    d_period: int = 3,
+    smoothing: int = 3,
+) -> tuple[pd.Series, pd.Series]:
+    """Slow stochastic oscillator (%K/%D).
+
+    %K = 100 * (close - lowest_low) / (highest_high - lowest_low).
+    A small smoothing is applied to make it usable for Boom/Crash pullback timing.
+    """
+    k_period = max(3, int(k_period))
+    d_period = max(1, int(d_period))
+    smoothing = max(1, int(smoothing))
+
+    low_min = df["low"].rolling(k_period, min_periods=k_period).min()
+    high_max = df["high"].rolling(k_period, min_periods=k_period).max()
+    raw_k = 100.0 * (df["close"] - low_min) / (high_max - low_min).replace(0, np.nan)
+    slow_k = raw_k.rolling(smoothing, min_periods=smoothing).mean()
+    slow_d = slow_k.rolling(d_period, min_periods=d_period).mean()
+    return slow_k.clip(0, 100), slow_d.clip(0, 100)
+
+
 def attach_core_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     Adds EMA(20/50/200), RSI(14), MACD histogram, Bollinger Bands, ATR(14).
@@ -69,6 +93,10 @@ def attach_core_indicators(df: pd.DataFrame) -> pd.DataFrame:
     ohlc["ema_200"] = _ema(close, 200)
 
     ohlc["rsi_14"] = _rsi_wilder(close, 14)
+
+    stoch_k, stoch_d = _stochastic_oscillator(ohlc, 14, 3, 3)
+    ohlc["stoch_k"] = stoch_k
+    ohlc["stoch_d"] = stoch_d
 
     macd_line = _ema(close, 12) - _ema(close, 26)
     signal_line = _ema(macd_line, 9)

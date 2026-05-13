@@ -85,6 +85,17 @@ class Settings:
     trigger_spike_strength: float
     trigger_tick_velocity_min: float
 
+    # Trend-following spike model / stochastic timing.
+    trend_following_spike_mode: bool
+    require_trend_alignment: bool
+    require_stoch_for_trigger: bool
+    stoch_enabled: bool
+    stoch_k_period: int
+    stoch_d_period: int
+    stoch_smoothing: int
+    stoch_oversold: float
+    stoch_overbought: float
+
     # TP/SL model.
     entry_zone_atr_multiplier: float
     stop_loss_atr_multiplier: float
@@ -165,6 +176,15 @@ def get_settings() -> Settings:
             trigger_min_signal_score=_float_env("TRIGGER_MIN_SIGNAL_SCORE", 80.0),
             trigger_spike_strength=_float_env("TRIGGER_SPIKE_STRENGTH", 0.9),
             trigger_tick_velocity_min=_float_env("TRIGGER_TICK_VELOCITY_MIN", 0.015),
+            trend_following_spike_mode=_bool_env("TREND_FOLLOWING_SPIKE_MODE", True),
+            require_trend_alignment=_bool_env("REQUIRE_TREND_ALIGNMENT", True),
+            require_stoch_for_trigger=_bool_env("REQUIRE_STOCH_FOR_TRIGGER", True),
+            stoch_enabled=_bool_env("STOCH_ENABLED", True),
+            stoch_k_period=max(3, _int_env("STOCH_K_PERIOD", 14)),
+            stoch_d_period=max(1, _int_env("STOCH_D_PERIOD", 3)),
+            stoch_smoothing=max(1, _int_env("STOCH_SMOOTHING", 3)),
+            stoch_oversold=_float_env("STOCH_OVERSOLD", 20.0),
+            stoch_overbought=_float_env("STOCH_OVERBOUGHT", 80.0),
             entry_zone_atr_multiplier=max(0.05, _float_env("ENTRY_ZONE_ATR_MULTIPLIER", 0.12)),
             stop_loss_atr_multiplier=max(0.5, _float_env("STOP_LOSS_ATR_MULTIPLIER", 2.2)),
             take_profit_1_atr_multiplier=max(0.5, _float_env("TAKE_PROFIT_1_ATR_MULTIPLIER", 3.0)),

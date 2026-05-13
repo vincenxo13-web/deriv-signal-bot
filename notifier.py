@@ -42,6 +42,21 @@ def risk_bucket_from_score(score: float) -> str:
     return "C / early/noisy"
 
 
+
+def _stoch_line(sig: Signal) -> str:
+    features = getattr(sig, "features", None) or {}
+    k = features.get("stoch_k")
+    d = features.get("stoch_d")
+    ok = features.get("stoch_trigger_ok")
+    if k is None or d is None:
+        return ""
+    try:
+        status = "✅" if bool(ok) else "⚠️"
+        return f"Stoch: {status} %K {float(k):.1f} / %D {float(d):.1f}\n"
+    except (TypeError, ValueError):
+        return ""
+
+
 def _bpr_line(sig: Signal) -> str:
     ctx = getattr(sig, "bpr_context", None) or {}
     if not isinstance(ctx, dict) or not ctx:
@@ -116,6 +131,7 @@ def format_signal_message(sig: Signal, tz_name: str = "Asia/Kuala_Lumpur") -> st
         f"TP1: <code>{_fmt_price(sig.take_profit_1)}</code> | "
         f"TP2: <code>{_fmt_price(sig.take_profit_2)}</code>\n"
         f"R:R: <b>{sig.risk_reward:.2f}:1</b>\n"
+        f"{_stoch_line(sig)}"
         f"{_bpr_line(sig)}\n"
     )
 

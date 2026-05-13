@@ -277,3 +277,27 @@ Recommended rollout:
 2. Let outcome tracking and ML feature logging collect data with BPR fields.
 3. Later, compare win rate for `bpr_aligned=true` vs `bpr_aligned=false`.
 4. Only make BPR mandatory if your data proves it improves results.
+
+
+## Trend-following stochastic spike model
+
+This build adds a stricter spike-catching model:
+
+- **Crash:** SELL only. Bias must be downtrend, then wait for a pull-up/retracement. Stochastic should be overbought or rolling down from the overbought area before a SELL trigger.
+- **Boom:** BUY only. Bias must be uptrend, then wait for a pull-down/retracement. Stochastic should be oversold or recovering from the oversold area before a BUY trigger.
+
+Railway variables:
+
+```env
+TREND_FOLLOWING_SPIKE_MODE=true
+REQUIRE_TREND_ALIGNMENT=true
+STOCH_ENABLED=true
+REQUIRE_STOCH_FOR_TRIGGER=true
+STOCH_K_PERIOD=14
+STOCH_D_PERIOD=3
+STOCH_SMOOTHING=3
+STOCH_OVERSOLD=20
+STOCH_OVERBOUGHT=80
+```
+
+This reduces weak alerts that happen while Boom is still drifting down or Crash is still drifting up. Stochastic is used as a timing filter, not as a standalone signal.

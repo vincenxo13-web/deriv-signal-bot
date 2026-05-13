@@ -541,11 +541,11 @@ def evaluate_signal(
     *,
     signal_warmup_bars: int = 220,
     warmup_bars: int | None = None,
-    preparation_alerts_enabled: bool = True,
+    preparation_alerts_enabled: bool = False,
     trigger_alerts_enabled: bool = True,
-    trigger_min_signal_score: float = 88.0,
-    trigger_spike_strength: float = 1.4,
-    trigger_tick_velocity_min: float = 0.05,
+    trigger_min_signal_score: float = 80.0,
+    trigger_spike_strength: float = 0.9,
+    trigger_tick_velocity_min: float = 0.015,
     entry_zone_atr_multiplier: float = 0.08,
     stop_loss_atr_multiplier: float = 2.8,
     take_profit_1_atr_multiplier: float = 3.5,
@@ -555,9 +555,9 @@ def evaluate_signal(
     micro_break_lookback: int = 3,
     ict_bpr_enabled: bool = True,
     ict_bpr_lookback_candles: int = 120,
-    ict_bpr_score_bonus: float = 8.0,
+    ict_bpr_score_bonus: float = 5.0,
     ict_bpr_require_for_trigger: bool = False,
-    ict_bpr_max_distance_atr: float = 1.5,
+    ict_bpr_max_distance_atr: float = 2.0,
     **extra_kwargs: Any,
 ) -> Signal | None:
     """
@@ -636,11 +636,13 @@ def evaluate_signal(
         reasons.append(note)
 
     pts, note = _wick_rejection_score(df1, side, atr)
+    wick_rejection_confirmed = bool(note and pts > 0)
     score += pts
     if note:
         reasons.append(note)
 
     pts, note = _drift_exhaustion_score(df1, side)
+    drift_exhaustion_confirmed = bool(note and pts > 0)
     score += pts
     if note:
         reasons.append(note)
@@ -715,17 +717,35 @@ def evaluate_signal(
     if rr < float(min_risk_reward):
         return None
 
-    trigger_confirmed = (
+    # Smarter confirmation model:
+    # - Best trigger: micro-break in the target direction.
+    # - Still acceptable: target spike pressure + wick rejection/drift exhaustion.
+    # This avoids endless PREP alerts while still stopping very early blind entries.
+    strong_price_action_confirmed = bool(
+        micro_ok
+        or (spike_pressure_confirmed and wick_rejection_confirmed)
+        or (spike_pressure_confirmed and drift_exhaustion_confirmed)
+    )
+
+    bpr_ok_for_trigger = bool(bpr_ctx.aligned or not ict_bpr_require_for_trigger)
+
+    trigger_confirmed = bool(
         trigger_alerts_enabled
         and score >= float(trigger_min_signal_score)
-        and spike_pressure_confirmed
-        and (micro_ok or not require_micro_break_for_trigger)
-        and (bpr_ctx.aligned or not ict_bpr_require_for_trigger)
+        and strong_price_action_confirmed
+        and bpr_ok_for_trigger
     )
 
     if trigger_confirmed:
         stage: AlertStage = "TRIGGER"
-    elif preparation_alerts_enabled and score >= float(min_score):
+        if micro_ok:
+            reasons.insert(0, "Trigger confirmed by micro-break in target direction")
+        elif wick_rejection_confirmed:
+            reasons.insert(0, "Trigger confirmed by rejection candle + target spike pressure")
+        elif drift_exhaustion_confirmed:
+            reasons.insert(0, "Trigger confirmed by drift exhaustion + target spike pressure")
+    elif preparation_alerts_enabled and score >= max(float(min_score), float(trigger_min_signal_score) - 6.0):
+        # PREP is intentionally stricter now. It is watch-only and should not be spammy.
         stage = "PREP"
     else:
         return None

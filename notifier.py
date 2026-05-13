@@ -42,86 +42,91 @@ def risk_bucket_from_score(score: float) -> str:
     return "C / early/noisy"
 
 
+def _bpr_line(sig: Signal) -> str:
+    ctx = getattr(sig, "bpr_context", None) or {}
+    if not isinstance(ctx, dict) or not ctx:
+        return "H4 BPR: n/a"
+
+    status = str(ctx.get("status", "UNKNOWN")).upper()
+    aligned = bool(ctx.get("aligned"))
+    zone_low = ctx.get("zone_low")
+    zone_high = ctx.get("zone_high")
+    dist = ctx.get("distance_atr")
+
+    if aligned:
+        icon = "✅"
+    elif status in {"NEAR", "FAR"}:
+        icon = "⚠️"
+    else:
+        icon = "❌"
+
+    zone = ""
+    if zone_low is not None and zone_high is not None:
+        try:
+            zone = f" | Zone: {_fmt_price(float(zone_low))}-{_fmt_price(float(zone_high))}"
+        except Exception:
+            zone = ""
+
+    dist_txt = ""
+    if dist is not None:
+        try:
+            dist_txt = f" | Dist: {float(dist):.2f} ATR"
+        except Exception:
+            dist_txt = ""
+
+    return f"H4 BPR: {icon} {html.escape(status)}{zone}{dist_txt}"
+
+
 def format_signal_message(sig: Signal, tz_name: str = "Asia/Kuala_Lumpur") -> str:
-    """Short, fast-to-read Telegram signal message."""
     local_time, _ = _fmt_time(sig.timestamp_epoch, tz_name)
-    stage = str(getattr(sig, "alert_stage", "SIGNAL")).upper()
+    stage = str(getattr(sig, "alert_stage", "TRIGGER")).upper()
     side = str(sig.side).upper()
     symbol = str(sig.symbol).upper()
 
-    if symbol.startswith("BOOM"):
-        icon = "🟢" if stage == "TRIGGER" else "🟡"
-    elif symbol.startswith("CRASH"):
-        icon = "🔴" if stage == "TRIGGER" else "🟡"
+    if stage == "TRIGGER":
+        icon = "🟢" if side == "BUY" else "🔴"
+        note = "Signal only — confirm with chart before entering."
     else:
-        icon = "⚪"
-
-    if stage == "PREP":
-        title = f"{icon} {symbol} {side} PREP / WATCH"
+        icon = "🟡"
         note = "Watch only — wait for trigger confirmation."
-    elif stage == "TRIGGER":
-        title = f"{icon} {symbol} {side} TRIGGER"
-        note = "Signal only — confirm before entering."
-    else:
-        title = f"{icon} {symbol} {side} SIGNAL"
-        note = "Signal only — confirm before entering."
 
-    reasons = sig.reasons[:4]
-    reason_lines = "\n".join(f"• {html.escape(reason)}" for reason in reasons)
+    title = f"{icon} {html.escape(symbol)} {html.escape(side)} {html.escape(stage)}"
 
-    volatility = ""
-    if sig.volatility_warning:
-        volatility = f"\nVolatility: {html.escape(sig.volatility_warning)}"
+    reasons = getattr(sig, "reasons", []) or []
+    short_reasons = []
+    for reason in reasons:
+        if not reason:
+            continue
+        text = str(reason)
+        # Keep Telegram compact.
+        if len(text) > 90:
+            text = text[:87] + "..."
+        short_reasons.append(text)
+        if len(short_reasons) >= 4:
+            break
+
+    reason_text = ""
+    if short_reasons:
+        reason_text = "\n".join(f"• {html.escape(r)}" for r in short_reasons)
 
     msg = (
-        f"<b>{html.escape(title)}</b> | <b>{sig.score:.0f}/100</b>\n\n"
+        f"<b>{title}</b> | <b>{sig.score:.0f}/100</b>\n\n"
         f"Entry: <code>{_fmt_price(sig.entry_zone_low)} - {_fmt_price(sig.entry_zone_high)}</code>\n"
         f"SL: <code>{_fmt_price(sig.stop_loss)}</code>\n"
         f"TP1: <code>{_fmt_price(sig.take_profit_1)}</code> | "
         f"TP2: <code>{_fmt_price(sig.take_profit_2)}</code>\n"
         f"R:R: <b>{sig.risk_reward:.2f}:1</b>\n"
+        f"{_bpr_line(sig)}\n"
     )
 
-    bpr_line = ""
-    bpr = getattr(sig, "bpr_context", None) or {}
-    if isinstance(bpr, dict) and bpr:
-        status = str(bpr.get("status", "UNKNOWN")).upper()
-        if bool(bpr.get("aligned")):
-            bpr_icon = "✅"
-        elif status in {"NEAR", "NO_ZONE"}:
-            bpr_icon = "⚠️"
-        elif status == "OFF":
-            bpr_icon = "➖"
-        else:
-            bpr_icon = "❌"
-        zone_low = bpr.get("zone_low")
-        zone_high = bpr.get("zone_high")
-        distance = bpr.get("distance_atr")
-        zone_text = ""
-        if zone_low is not None and zone_high is not None:
-            try:
-                zone_text = f" | Zone: <code>{_fmt_price(float(zone_low))}-{_fmt_price(float(zone_high))}</code>"
-            except (TypeError, ValueError):
-                zone_text = ""
-        dist_text = ""
-        if distance is not None:
-            try:
-                dist_text = f" | Dist: {float(distance):.2f} ATR"
-            except (TypeError, ValueError):
-                dist_text = ""
-        bpr_line = f"\nH4 BPR: {bpr_icon} <b>{html.escape(status)}</b>{zone_text}{dist_text}"
-
-    if reason_lines:
-        msg += f"\n<b>Why:</b>\n{reason_lines}\n"
+    if reason_text:
+        msg += f"\n<b>Why:</b>\n{reason_text}\n"
 
     msg += (
-        f"{bpr_line}"
         f"\nRegime: <code>{html.escape(str(sig.regime))}</code>"
-        f"{volatility}"
         f"\nSent: <b>{html.escape(local_time)}</b>"
         f"\n\n⚠️ {html.escape(note)}"
     )
-
     return msg
 
 def format_outcome_message(event: dict, tz_name: str = "Asia/Kuala_Lumpur") -> str:

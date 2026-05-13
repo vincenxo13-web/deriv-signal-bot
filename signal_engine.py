@@ -54,7 +54,7 @@ class SignalEngine:
             min_score=self.settings.min_signal_score,
             now_epoch=time.time(),
             warmup_bars=self.settings.signal_warmup_bars,
-            trigger_min_score=self.settings.trigger_min_signal_score,
+            trigger_min_signal_score=self.settings.trigger_min_signal_score,
             trigger_spike_strength=self.settings.trigger_spike_strength,
             trigger_tick_velocity_min=self.settings.trigger_tick_velocity_min,
             entry_zone_atr_multiplier=self.settings.entry_zone_atr_multiplier,
@@ -100,7 +100,7 @@ class SignalEngine:
                 created_epoch=sig.timestamp_epoch,
             )
 
-        self.risk.observe_signal_sent(symbol, stage=sig.alert_stage)
+        self.risk.observe_signal_sent(symbol)
 
         await self.notifier.broadcast(sig)
         await self._publish_snapshot(symbol, df_feat, sig, spike_ctx)

@@ -83,6 +83,50 @@ class Notifier:
 
         self._maybe_desktop(text, sig)
 
+
+    async def broadcast_outcomes(self, events: list[dict]) -> None:
+        """Send Telegram notifications when tracked signals resolve.
+
+        This method exists even when NOTIFY_SIGNAL_OUTCOMES=false so the
+        signal engine can remain compatible across deployments. The engine
+        decides whether to call it based on settings.notify_signal_outcomes.
+        """
+        if not events:
+            return
+
+        for event in events:
+            try:
+                symbol = str(event.get("symbol", "UNKNOWN")).upper()
+                side = str(event.get("side", "")).upper()
+                outcome = str(
+                    event.get("outcome_status", event.get("status", "RESOLVED"))
+                ).upper()
+
+                price = event.get("outcome_price")
+                reason = event.get("outcome_reason") or event.get("outcome_note") or ""
+
+                if outcome.startswith("WIN"):
+                    icon = "✅"
+                elif outcome.startswith("LOSS"):
+                    icon = "❌"
+                elif outcome == "EXPIRED":
+                    icon = "⌛"
+                else:
+                    icon = "ℹ️"
+
+                message = (
+                    f"{icon} <b>{symbol} {side} RESULT</b>\n"
+                    f"Outcome: <b>{outcome}</b>"
+                )
+                if price is not None:
+                    message += f"\nPrice: <code>{float(price):.5f}</code>"
+                if reason:
+                    message += f"\nNote: {reason}"
+
+                await self.send_text(message)
+            except Exception:
+                logger.exception("Failed to broadcast outcome event: %s", event)
+
     async def _send_telegram(self, text: str) -> None:
         token = self.settings.telegram_bot_token
         chat = self.settings.telegram_chat_id
@@ -94,6 +138,9 @@ class Notifier:
             "text": text,
             "disable_web_page_preview": True,
         }
+        parse_mode = getattr(self.settings, "telegram_parse_mode", None)
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:
                 resp = await client.post(url, json=payload)

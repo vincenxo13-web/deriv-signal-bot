@@ -144,7 +144,11 @@ class SignalEngine:
                     await self.storage.update_signal_feature_outcomes(events)
                 except Exception:
                     logger.exception("Failed to update ML feature outcomes")
-            await self.notifier.broadcast_outcomes(events)
+            if getattr(self.settings, "notify_signal_outcomes", False):
+                if hasattr(self.notifier, "broadcast_outcomes"):
+                    await self.notifier.broadcast_outcomes(events)
+                else:
+                    logger.warning("Outcome notification enabled but notifier.broadcast_outcomes is missing")
 
     async def _publish_snapshot(self, symbol: str, df_1m: pd.DataFrame, sig, spike_ctx: SpikeContext, extra_note: str | None = None) -> None:
         snap = await self.storage.get_meta("dashboard_snapshot") or {}

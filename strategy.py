@@ -8,10 +8,13 @@ Scores are capped at 100; default minimum to alert is 75 via config.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import logging
 from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 from indicators import (
     attach_core_indicators,
@@ -49,6 +52,7 @@ class Signal:
     volatility_warning: str | None
     regime: str
     timestamp_epoch: float
+    alert_stage: str = "TRIGGER"
 
 
 def signal_to_storage_row(sig: Signal) -> dict[str, Any]:
@@ -64,6 +68,21 @@ def signal_to_storage_row(sig: Signal) -> dict[str, Any]:
         "created_epoch": ts,
         **data,
     }
+
+
+def allowed_side_for_symbol(symbol: str) -> Literal["BUY", "SELL"] | None:
+    """Crash = SELL only, Boom = BUY only."""
+    sym = str(symbol).upper()
+    if sym.startswith("BOOM"):
+        return "BUY"
+    if sym.startswith("CRASH"):
+        return "SELL"
+    return None
+
+
+def _target_spike_direction(side: Literal["BUY", "SELL"]) -> str:
+    """BUY aims to catch upward Boom spikes; SELL aims to catch downward Crash spikes."""
+    return "up" if side == "BUY" else "down"
 
 
 def _resample_ohlc(df_1m: pd.DataFrame, rule: str) -> pd.DataFrame:

@@ -192,41 +192,33 @@ deriv-signal-bot/
 
 Stay curious, stay sceptical of any “edge,” and prioritise surviving the learning curve intact.
 
-## Regime conflict protection update
+## Entry validity and score honesty update
 
-This build fixes the issue where a BOOM BUY could still score highly while the regime label was `downtrend`, or a CRASH SELL could score highly while the regime label was `uptrend_high_volatility`.
+This build keeps the working Boom/Crash stochastic trend-following model, but makes the Telegram alert clearer and less overconfident.
 
 New behaviour:
 
-- BOOM BUY during a downtrend is blocked unless you explicitly allow counter-regime reversals.
-- CRASH SELL during an uptrend is blocked unless you explicitly allow counter-regime reversals.
-- High-volatility regimes require hard confirmation: target-direction spike pressure plus micro-break or strong rejection.
-- Micro-break confirmation receives higher weighting than indicator-only reasons.
-- Stochastic and EMA can support a signal, but they should not create a trigger alone.
+- Telegram alerts now have spacing and clear sections.
+- Every alert includes an **Entry rule** section.
+- Boom BUY alerts tell you to wait for price to **hold/reclaim the entry zone**.
+- Crash SELL alerts tell you to wait for price to **reject/hold below the entry zone**.
+- The bot no longer presents indicator-only setups as guaranteed. Scores are capped when context is incomplete.
+- No H4 BPR context caps the score slightly, but does not block a valid 1m micro-break setup.
+- High-volatility regimes cap score and require price-action confirmation.
 
 Recommended Railway variables:
 
 ```env
-PREPARATION_ALERTS_ENABLED=false
-TRIGGER_ALERTS_ENABLED=true
-MIN_SIGNAL_SCORE=72
-TRIGGER_MIN_SIGNAL_SCORE=82
-TRIGGER_SPIKE_STRENGTH=0.8
-TRIGGER_TICK_VELOCITY_MIN=0.01
-
-REQUIRE_TREND_ALIGNMENT=true
-REQUIRE_REGIME_ALIGNMENT=true
-ALLOW_COUNTER_REGIME_REVERSAL=false
-REGIME_CONFLICT_PENALTY=35
-REQUIRE_PRICE_ACTION_CONFIRMATION_IN_HIGH_VOL=true
-
-STOCH_ENABLED=true
-REQUIRE_STOCH_FOR_TRIGGER=true
-STOCH_K_PERIOD=14
-STOCH_D_PERIOD=3
-STOCH_SMOOTHING=3
-STOCH_OVERSOLD=20
-STOCH_OVERBOUGHT=80
+SCORE_CAP_WITHOUT_BPR=92
+SCORE_CAP_HIGH_VOLATILITY=88
+SCORE_CAP_NO_HARD_CONFIRMATION=80
+REQUIRE_MICRO_BREAK_FOR_TRIGGER=true
+MICRO_BREAK_LOOKBACK=3
 ```
 
-If triggers become too rare, lower only `TRIGGER_MIN_SIGNAL_SCORE` to `78` first. Do not set `ALLOW_COUNTER_REGIME_REVERSAL=true` until the outcome stats prove it helps.
+Interpretation:
+
+- A score near 90 can still be good, but it is not a guarantee.
+- For Boom, do not blindly enter as price falls. Wait for a hold/reclaim of the zone.
+- For Crash, do not blindly enter as price rises. Wait for rejection back below the zone.
+- TP1/TP2 are the planned signal targets. Holding beyond them becomes a manual runner.

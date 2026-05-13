@@ -48,6 +48,11 @@ def _split_symbols(raw: str | None) -> list[str]:
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 
+def get_data_dir() -> Path:
+    """Return persistent data directory. Railway volume should mount to /app/data."""
+    return Path(os.getenv("RAILWAY_VOLUME_MOUNT_PATH", os.getenv("DATA_DIR", "data"))).resolve()
+
+
 @dataclass(frozen=True)
 class Settings:
     deriv_app_id: int
@@ -97,6 +102,10 @@ class Settings:
     stoch_oversold: float
     stoch_overbought: float
 
+    score_cap_without_bpr: float
+    score_cap_high_volatility: float
+    score_cap_no_hard_confirmation: float
+
     outcome_tracking_enabled: bool
     signal_expiry_minutes: int
     notify_signal_outcomes: bool
@@ -136,7 +145,7 @@ _SETTINGS_INSTANCE: Settings | None = None
 def get_settings() -> Settings:
     global _SETTINGS_INSTANCE
     if _SETTINGS_INSTANCE is None:
-        data_dir = Path(os.getenv("DATA_DIR") or (_project_root() / "data"))
+        data_dir = get_data_dir()
         db_path = data_dir / "deriv_signals.db"
 
         symbols = tuple(_split_symbols(os.getenv("SYMBOLS")))
@@ -180,7 +189,7 @@ def get_settings() -> Settings:
             require_trend_alignment=_bool_env("REQUIRE_TREND_ALIGNMENT", True),
             require_regime_alignment=_bool_env("REQUIRE_REGIME_ALIGNMENT", True),
             allow_counter_regime_reversal=_bool_env("ALLOW_COUNTER_REGIME_REVERSAL", False),
-            regime_conflict_penalty=max(0.0, _float_env("REGIME_CONFLICT_PENALTY", 35.0)),
+            regime_conflict_penalty=_float_env("REGIME_CONFLICT_PENALTY", 35.0),
             require_price_action_confirmation_in_high_vol=_bool_env("REQUIRE_PRICE_ACTION_CONFIRMATION_IN_HIGH_VOL", True),
             stoch_enabled=_bool_env("STOCH_ENABLED", True),
             require_stoch_for_trigger=_bool_env("REQUIRE_STOCH_FOR_TRIGGER", True),
@@ -189,9 +198,12 @@ def get_settings() -> Settings:
             stoch_smoothing=max(1, _int_env("STOCH_SMOOTHING", 3)),
             stoch_oversold=_float_env("STOCH_OVERSOLD", 20.0),
             stoch_overbought=_float_env("STOCH_OVERBOUGHT", 80.0),
+            score_cap_without_bpr=_float_env("SCORE_CAP_WITHOUT_BPR", 92.0),
+            score_cap_high_volatility=_float_env("SCORE_CAP_HIGH_VOLATILITY", 88.0),
+            score_cap_no_hard_confirmation=_float_env("SCORE_CAP_NO_HARD_CONFIRMATION", 80.0),
             outcome_tracking_enabled=_bool_env("OUTCOME_TRACKING_ENABLED", True),
             signal_expiry_minutes=max(5, _int_env("SIGNAL_EXPIRY_MINUTES", 180)),
-            notify_signal_outcomes=_bool_env("NOTIFY_SIGNAL_OUTCOMES", True),
+            notify_signal_outcomes=_bool_env("NOTIFY_SIGNAL_OUTCOMES", False),
             ml_feature_logging_enabled=_bool_env("ML_FEATURE_LOGGING_ENABLED", True),
             ml_training_min_samples=max(20, _int_env("ML_TRAINING_MIN_SAMPLES", 200)),
             ict_bpr_enabled=_bool_env("ICT_BPR_ENABLED", True),
@@ -205,37 +217,14 @@ def get_settings() -> Settings:
             estimated_spread_points=_float_env("ESTIMATED_SPREAD_POINTS", 4.0),
             extreme_atr_ratio_threshold=_float_env("EXTREME_ATR_RATIO_THRESHOLD", 3.2),
             cooldown_after_spike_seconds=max(0, _int_env("COOLDOWN_AFTER_SPIKE_SECONDS", 5)),
-            spike_body_atr_multiplier_boom=_float_env("SPIKE_BODY_ATR_MULTIPLIER_BOOM", 3.5),
-            spike_body_atr_multiplier_crash=_float_env("SPIKE_BODY_ATR_MULTIPLIER_CRASH", 3.5),
-            spike_tick_velocity_threshold_boom=_float_env("SPIKE_TICK_VELOCITY_THRESHOLD_BOOM", 0.02),
-            spike_tick_velocity_threshold_crash=_float_env("SPIKE_TICK_VELOCITY_THRESHOLD_CRASH", 0.02),
-            daily_loss_limit_percent=_float_env("DAILY_LOSS_LIMIT_PERCENT", 5.0),
-            max_open_trades=max(1, _int_env("MAX_OPEN_TRADES", 3)),
+            spike_body_atr_multiplier_boom=_float_env("SPIKE_BODY_ATR_MULTIPLIER_BOOM", 2.5),
+            spike_body_atr_multiplier_crash=_float_env("SPIKE_BODY_ATR_MULTIPLIER_CRASH", 2.5),
+            spike_tick_velocity_threshold_boom=_float_env("SPIKE_TICK_VELOCITY_THRESHOLD_BOOM", 0.0015),
+            spike_tick_velocity_threshold_crash=_float_env("SPIKE_TICK_VELOCITY_THRESHOLD_CRASH", 0.0015),
+            daily_loss_limit_percent=_float_env("DAILY_LOSS_LIMIT_PERCENT", 2.0),
+            max_open_trades=max(1, _int_env("MAX_OPEN_TRADES", 1)),
             dashboard_refresh_seconds=max(1, _int_env("DASHBOARD_REFRESH_SECONDS", 2)),
             log_level=(os.getenv("LOG_LEVEL") or "INFO").strip().upper(),
             data_db_path=db_path,
         )
     return _SETTINGS_INSTANCE
-
-
-def execution_allowed(settings: Settings) -> tuple[bool, str]:
-    if settings.mode.strip().lower() == "signal_only":
-        return False, "MODE is signal_only."
-    if not settings.enable_real_trading:
-        return False, "ENABLE_REAL_TRADING is false."
-    expected = "I_UNDERSTAND_REAL_TRADING_RISK"
-    if settings.deriv_real_trading_confirm != expected:
-        return False, "DERIV_REAL_TRADING_CONFIRM missing."
-    return True, "Execution checks passed."
-
-def get_data_dir() -> Path:
-    """Return the persistent data directory used for SQLite + logs.
-
-    Railway should set DATA_DIR=/app/data. Locally, this falls back to
-    the project data/ folder.
-    """
-    raw = os.getenv("DATA_DIR")
-    if raw and raw.strip():
-        return Path(raw).expanduser().resolve()
-    return (_project_root() / "data").resolve()
-

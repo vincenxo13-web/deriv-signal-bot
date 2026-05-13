@@ -7,6 +7,7 @@ Feeds the signal engine whenever a fresh 1m bar completes.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -93,7 +94,8 @@ class SymbolRuntime:
         self.settings = settings
         self.minute_agg = MinuteBarAggregator(symbol)
         self.velocity = TickVelocityTracker()
-        self.bars_1m: deque[CompletedBar] = deque(maxlen=2500)
+        max_bars = int(os.getenv("WARM_START_CANDLE_LIMIT", "2000"))
+        self.bars_1m: deque[CompletedBar] = deque(maxlen=max(max_bars + 100, 2500))
         self.last_spike_epoch: float | None = None
         self.last_spike_direction: str = "none"
         self.last_spike_strength: float = 0.0
@@ -199,7 +201,12 @@ class MarketStreamRouter:
         persistent Railway volume already contains enough candle history.
         """
         warmup_bars = int(getattr(self.settings, "signal_warmup_bars", 180))
-        load_limit = max(warmup_bars + 80, 300)
+        try:
+            requested_limit = int(os.getenv("WARM_START_CANDLE_LIMIT", "2000"))
+        except ValueError:
+            requested_limit = 2000
+
+        load_limit = max(requested_limit, warmup_bars + 80, 300)
 
         for symbol, runtime in self.symbols.items():
             try:

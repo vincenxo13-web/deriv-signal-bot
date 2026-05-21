@@ -65,73 +65,35 @@ def risk_bucket_from_score(score: float) -> str:
 
 
 def format_signal_message(sig: Signal, risk_label: str = "Medium") -> str:
+    """Compact Telegram message for fast trading decisions."""
     stage = str(getattr(sig, "alert_stage", "TRIGGER")).upper()
     symbol = str(sig.symbol).upper()
     side = str(sig.side).upper()
+    icon = "🟢" if side == "BUY" else "🔴" if side == "SELL" else "⚪"
 
-    if symbol.startswith("BOOM"):
-        icon = "🟢"
-        market_hint = "Boom BUY setup"
-    elif symbol.startswith("CRASH"):
-        icon = "🔴"
-        market_hint = "Crash SELL setup"
-    else:
-        icon = "⚪"
-        market_hint = "Signal setup"
+    confirmation = getattr(sig, "confirmation_summary", None) or "confirm on chart"
+    regime = str(getattr(sig, "regime", "unknown"))
+    warning = ""
+    if "high_volatility" in regime.lower():
+        warning = "\n⚠️ High volatility — use smaller size / wait for cleaner retest"
 
-    title = f"{icon} <b>{_esc(symbol)} {side} {stage}</b> | <b>{sig.score:.0f}/100</b>"
-
-    entry_rule = getattr(sig, "entry_rule", None) or (
-        "Wait for price to hold/reclaim the entry zone before entering."
-        if side == "BUY"
-        else "Wait for price to reject/hold below the entry zone before entering."
-    )
-    entry_validity = getattr(sig, "entry_validity", None) or "Use the SL/invalidation level if the setup fails."
-    confirmation = getattr(sig, "confirmation_summary", None) or "Confirm with chart before entering."
-
-    reasons = getattr(sig, "reasons", []) or []
-    reason_lines = "\n".join(f"• {_esc(reason)}" for reason in reasons[:5])
-    if not reason_lines:
-        reason_lines = "• No extra reason text available"
-
-    warning_lines: list[str] = []
-    if getattr(sig, "volatility_warning", None):
-        warning_lines.append(f"Volatility: {_esc(sig.volatility_warning)}")
-    if "high_volatility" in str(sig.regime).lower():
-        warning_lines.append("High-volatility regime — wait for cleaner confirmation or use smaller size.")
-    if "downtrend" in str(sig.regime).lower() and side == "BUY":
-        warning_lines.append("Regime conflict: Boom BUY while regime says downtrend.")
-    if "uptrend" in str(sig.regime).lower() and side == "SELL":
-        warning_lines.append("Regime conflict: Crash SELL while regime says uptrend.")
-
-    warning_block = ""
-    if warning_lines:
-        warning_block = "\n\n⚠️ <b>Warnings</b>\n" + "\n".join(f"• {_esc(w)}" for w in warning_lines)
+    bpr = getattr(sig, "bpr_context", None) or {}
+    bpr_status = str(bpr.get("status", "NO_DATA")).upper()
 
     return (
-        f"{title}\n\n"
-        f"📍 <b>Entry zone</b>\n"
-        f"<code>{_fmt_price(sig.entry_zone_low)} – {_fmt_price(sig.entry_zone_high)}</code>\n\n"
-        f"✅ <b>Entry rule</b>\n"
-        f"{_esc(entry_rule)}\n\n"
-        f"🧭 <b>Entry validity</b>\n"
-        f"{_esc(entry_validity)}\n\n"
-        f"🛑 <b>SL</b>: <code>{_fmt_price(sig.stop_loss)}</code>\n"
-        f"✅ <b>TP1</b>: <code>{_fmt_price(sig.take_profit_1)}</code>\n"
-        f"✅ <b>TP2</b>: <code>{_fmt_price(sig.take_profit_2)}</code>\n"
-        f"📐 <b>R:R</b>: {sig.risk_reward:.2f}:1\n\n"
-        f"🧩 <b>Confirmation</b>\n"
-        f"{_esc(confirmation)}\n\n"
-        f"{_bpr_line(sig)}\n\n"
-        f"📌 <b>Why</b>\n"
-        f"{reason_lines}\n\n"
-        f"📊 <b>Regime</b>: <code>{_esc(sig.regime)}</code>\n"
-        f"⚖️ <b>Risk</b>: {_esc(risk_label)}\n"
-        f"⏱ <b>Sent</b>: {_esc(_sent_time(sig))}"
-        f"{warning_block}\n\n"
-        f"⚠️ Signal only — confirm with chart before entering."
+        f"{icon} <b>{_esc(symbol)} {side} {stage}</b> | <b>{sig.score:.0f}/100</b>\n\n"
+        f"Entry: <code>{_fmt_price(sig.entry_zone_low)}–{_fmt_price(sig.entry_zone_high)}</code>\n"
+        f"SL: <code>{_fmt_price(sig.stop_loss)}</code>\n"
+        f"TP1: <code>{_fmt_price(sig.take_profit_1)}</code> | TP2: <code>{_fmt_price(sig.take_profit_2)}</code>\n"
+        f"R:R: <b>{sig.risk_reward:.2f}:1</b>\n\n"
+        f"Rule: {_esc(getattr(sig, 'entry_rule', None) or ('hold/reclaim zone' if side == 'BUY' else 'reject/hold below zone'))}\n"
+        f"Confirm: <b>{_esc(confirmation)}</b>\n"
+        f"Regime: <code>{_esc(regime)}</code>\n"
+        f"BPR: {_esc(bpr_status)}"
+        f"{warning}\n\n"
+        f"Sent: {_esc(_sent_time(sig))}\n"
+        f"Signal only."
     )
-
 
 class Notifier:
     def __init__(self, settings) -> None:

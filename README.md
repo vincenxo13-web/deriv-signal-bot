@@ -222,3 +222,46 @@ Interpretation:
 - For Boom, do not blindly enter as price falls. Wait for a hold/reclaim of the zone.
 - For Crash, do not blindly enter as price rises. Wait for rejection back below the zone.
 - TP1/TP2 are the planned signal targets. Holding beyond them becomes a manual runner.
+
+
+## Sniper Pullback Strategy v2
+
+This build replaces the late-confirmation trigger model with a pullback/rejection model:
+
+- Boom = BUY only, Crash = SELL only.
+- The bot looks for pullback zones first, then checks for rejection, early spike pressure, or a small micro-break.
+- Target-direction spike pressure supports the signal, but the bot tries not to wait until the whole spike/drop has already moved.
+- Anti-chase logic rejects candles that have already travelled too far from the setup zone.
+- Stochastic is used as a scoring/context factor by default, not a hard blocker.
+- Telegram alerts are compact so the entry, SL, TP, confirmation, and regime are easy to read.
+
+Recommended Railway variables for this strategy:
+
+```env
+SYMBOLS=BOOM300N,BOOM500,CRASH300N,CRASH500
+
+PREPARATION_ALERTS_ENABLED=false
+TRIGGER_ALERTS_ENABLED=true
+TRIGGER_MIN_SIGNAL_SCORE=76
+TRIGGER_SPIKE_STRENGTH=0.55
+TRIGGER_TICK_VELOCITY_MIN=0.004
+
+REQUIRE_TREND_ALIGNMENT=false
+REQUIRE_REGIME_ALIGNMENT=true
+ALLOW_COUNTER_REGIME_REVERSAL=false
+STOCH_ENABLED=true
+REQUIRE_STOCH_FOR_TRIGGER=false
+REQUIRE_MICRO_BREAK_FOR_TRIGGER=false
+
+ENTRY_ZONE_ATR_MULTIPLIER=0.10
+STOP_LOSS_ATR_MULTIPLIER=3.0
+TAKE_PROFIT_1_ATR_MULTIPLIER=4.5
+TAKE_PROFIT_2_ATR_MULTIPLIER=7.5
+MIN_RISK_REWARD=1.0
+
+SCORE_CAP_WITHOUT_BPR=92
+SCORE_CAP_HIGH_VOLATILITY=86
+SCORE_CAP_NO_HARD_CONFIRMATION=78
+```
+
+Signals are still research alerts, not financial advice. Watch the next 50-100 resolved triggers before trusting the new model.

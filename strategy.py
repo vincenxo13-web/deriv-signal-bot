@@ -397,33 +397,38 @@ def evaluate_signal(
     warmup_bars: int | None = None,
     preparation_alerts_enabled: bool = False,
     trigger_alerts_enabled: bool = True,
-    trigger_min_signal_score: float = 82.0,
+    trigger_min_signal_score: float = 76.0,
     trigger_min_score: float | None = None,
-    trigger_spike_strength: float = 0.8,
-    trigger_tick_velocity_min: float = 0.01,
-    entry_zone_atr_multiplier: float = 0.08,
-    stop_loss_atr_multiplier: float = 2.8,
-    take_profit_1_atr_multiplier: float = 3.5,
-    take_profit_2_atr_multiplier: float = 6.0,
-    min_risk_reward: float = 1.2,
-    require_micro_break_for_trigger: bool = True,
+    trigger_spike_strength: float = 0.55,
+    trigger_tick_velocity_min: float = 0.004,
+    entry_zone_atr_multiplier: float = 0.10,
+    stop_loss_atr_multiplier: float = 3.0,
+    take_profit_1_atr_multiplier: float = 4.5,
+    take_profit_2_atr_multiplier: float = 7.5,
+    min_risk_reward: float = 1.0,
+    require_micro_break_for_trigger: bool = False,
     micro_break_lookback: int = 3,
     trend_following_spike_mode: bool = True,
-    require_trend_alignment: bool = True,
+    require_trend_alignment: bool = False,
     require_regime_alignment: bool = True,
     allow_counter_regime_reversal: bool = False,
     regime_conflict_penalty: float = 35.0,
     require_price_action_confirmation_in_high_vol: bool = True,
     stoch_enabled: bool = True,
-    require_stoch_for_trigger: bool = True,
+    require_stoch_for_trigger: bool = False,
     stoch_oversold: float = 20.0,
     stoch_overbought: float = 80.0,
     score_cap_without_bpr: float = 92.0,
-    score_cap_high_volatility: float = 88.0,
-    score_cap_no_hard_confirmation: float = 80.0,
+    score_cap_high_volatility: float = 86.0,
+    score_cap_no_hard_confirmation: float = 78.0,
     **_: Any,
 ) -> Signal | None:
-    """Evaluate a completed 1m bar and return one signal or None."""
+    """Sniper Pullback Strategy v2.
+
+    The old strategy waited for full target-direction spike confirmation, which often made
+    entries late. This version prioritises a pullback/rejection setup first, then allows a
+    trigger on early confirmation while rejecting obvious chase candles.
+    """
     side = allowed_side_for_symbol(symbol)
     if side is None:
         return None
@@ -439,6 +444,9 @@ def evaluate_signal(
 
     row = df1.iloc[-1]
     last_close = _safe_float(row.get("close"))
+    last_open = _safe_float(row.get("open"))
+    last_high = _safe_float(row.get("high"))
+    last_low = _safe_float(row.get("low"))
     atr = _safe_float(row.get("atr_14"))
     if not np.isfinite(last_close) or not np.isfinite(atr) or atr <= 0:
         return None
@@ -447,44 +455,51 @@ def evaluate_signal(
     regime, vol_note = classify_regime(df1)
     zones = detect_sr_zones(df1)
     target_dir = _target_spike_direction(side)
-    target_spike_candidate = spike_ctx.spike_direction == target_dir and spike_ctx.spike_strength >= max(0.65, trigger_spike_strength * 0.75)
+    target_spike_candidate = spike_ctx.spike_direction == target_dir and spike_ctx.spike_strength >= max(0.45, trigger_spike_strength * 0.75)
 
     reasons: list[str] = []
     score = 0.0
 
-    trend_pts, trend_reasons, trend_ok = _trend_context_score(df1, side)
-    score += trend_pts
-    reasons.extend(trend_reasons)
-
+    # 1) Direction/regime: block only obvious hard conflicts. Transition/ranging can be valid
+    # for Boom/Crash because many spikes start from messy pullback zones.
     conflict = _regime_conflicts(side, regime)
-    hard_reversal_allowed = False
-    if conflict:
-        if not allow_counter_regime_reversal and require_regime_alignment:
-            if target_spike_candidate:
-                logger.info("%s rejected %s trigger: regime conflict (%s)", symbol, side, regime)
-            return None
+    if conflict and require_regime_alignment and not allow_counter_regime_reversal:
+        if target_spike_candidate:
+            logger.info("%s rejected %s trigger: regime conflict (%s)", symbol, side, regime)
+        return None
+    elif conflict:
         score -= abs(float(regime_conflict_penalty))
         reasons.append(f"Regime conflict warning: {regime}")
 
+    # 2) Trend is useful, but no longer a hard blocker by default.
+    trend_pts, trend_reasons, trend_ok = _trend_context_score(df1, side)
+    score += min(trend_pts, 14.0)
+    reasons.extend(trend_reasons)
     if require_trend_alignment and not trend_ok:
         if target_spike_candidate:
             logger.info("%s rejected %s trigger: trend context not aligned | regime=%s", symbol, side, regime)
         return None
 
+    # 3) Stochastic is used as context, not an absolute gate unless explicitly requested.
     if stoch_enabled:
         stoch_ok, stoch_note, stoch_k, stoch_d = _stoch_timing_ok(df1, side, stoch_oversold, stoch_overbought)
         if stoch_ok:
-            score += 14.0
+            score += 12.0
             reasons.append(stoch_note)
-        elif require_stoch_for_trigger:
-            if target_spike_candidate:
-                logger.info("%s rejected %s trigger: %s | regime=%s", symbol, side, stoch_note, regime)
-            return None
         else:
+            if require_stoch_for_trigger:
+                if target_spike_candidate:
+                    logger.info("%s rejected %s trigger: %s | regime=%s", symbol, side, stoch_note, regime)
+                return None
+            # Mild penalty only. Extreme "wrong side" stoch is bad; neutral stoch is allowed.
+            wrong_extreme = (side == "BUY" and stoch_k >= 82 and stoch_d >= 70) or (side == "SELL" and stoch_k <= 18 and stoch_d <= 30)
+            score -= 12.0 if wrong_extreme else 4.0
             reasons.append(stoch_note)
     else:
         stoch_k = stoch_d = float("nan")
+        stoch_ok = True
 
+    # 4) Pullback/sniper setup components.
     rsi_pts, rsi_note, rsi = _rsi_score(df1, side)
     score += rsi_pts
     if rsi_note:
@@ -505,45 +520,94 @@ def evaluate_signal(
     if sq_note:
         reasons.append(sq_note)
 
-    rej_pts, rej_note = candle_rejection_score(side, df1)
-    rejection_ok = bool(rej_pts >= 8.0)
-    score += min(float(rej_pts or 0.0), 12.0)
-    if rej_note:
-        reasons.append(rej_note)
-
     tf_pts, tf_note = _higher_tf_score(dfs, side)
-    score += tf_pts
+    score += min(tf_pts, 10.0)
     if tf_note:
         reasons.append("Higher-TF support: " + tf_note)
 
-    spike_pts, spike_note, spike_ok = _spike_pressure_score(spike_ctx, side, trigger_spike_strength, trigger_tick_velocity_min)
-    score += spike_pts
-    if spike_note:
-        reasons.append(spike_note)
+    # 5) Price-action confirmation: rejection is preferred. Micro-break is useful, but no
+    # longer mandatory because it was making signals late.
+    rej_pts, rej_note = candle_rejection_score(side, df1)
+    rejection_ok = bool(rej_pts >= 8.0)
+    score += min(float(rej_pts or 0.0), 14.0)
+    if rej_note:
+        reasons.append(rej_note)
 
     micro_ok, micro_note = _micro_break_confirmed(df1, side, micro_break_lookback)
-    hard_confirmation = bool(micro_ok or rejection_ok)
-    if hard_confirmation:
-        score += 16.0 if micro_ok else 10.0
-        reasons.append(micro_note if micro_ok else "Rejection candle confirmation")
+    if micro_ok:
+        score += 10.0
+        reasons.append(micro_note)
     else:
         reasons.append(micro_note)
 
+    # 6) Spike pressure is now supportive, not the sole trigger source.
+    spike_pts, spike_note, spike_ok = _spike_pressure_score(spike_ctx, side, trigger_spike_strength, trigger_tick_velocity_min)
+    if spike_ok:
+        score += min(spike_pts, 12.0)
+    else:
+        score += min(spike_pts, 6.0)
+    if spike_note:
+        reasons.append(spike_note)
+
+    # 7) Anti-chase: reject when the move is probably already gone.
+    body = abs(last_close - last_open) if np.isfinite(last_open) else 0.0
+    bar_range = max(last_high - last_low, 1e-9) if np.isfinite(last_high) and np.isfinite(last_low) else 1e-9
+    body_atr = body / max(atr, 1e-9)
+    close_position = (last_close - last_low) / bar_range if side == "BUY" else (last_high - last_close) / bar_range
+    recent_high = float(df1["high"].iloc[-6:-1].max()) if len(df1) >= 8 else last_high
+    recent_low = float(df1["low"].iloc[-6:-1].min()) if len(df1) >= 8 else last_low
+    extension_atr = ((last_close - recent_high) / max(atr, 1e-9)) if side == "BUY" else ((recent_low - last_close) / max(atr, 1e-9))
+
+    chase_risk = False
+    if body_atr >= 2.4 and close_position >= 0.78 and extension_atr >= 0.35:
+        chase_risk = True
+    # Very strong target spike can be a sign that the candle already travelled too far.
+    if spike_ok and spike_ctx.spike_strength >= 1.85 and extension_atr >= 0.45:
+        chase_risk = True
+
+    if chase_risk:
+        if target_spike_candidate:
+            logger.info(
+                "%s rejected %s trigger: anti-chase failed | body_atr=%.2f close_pos=%.2f extension_atr=%.2f regime=%s",
+                symbol, side, body_atr, close_position, extension_atr, regime,
+            )
+        return None
+    elif body_atr >= 1.8 and close_position >= 0.70:
+        score -= 8.0
+        reasons.append("Anti-chase caution: move already extended")
+
+    # 8) Confirmation model. We want a setup before the full move, not only after a huge spike.
+    hard_confirmation = bool(rejection_ok or micro_ok)
+    early_pressure_ok = bool(spike_ok and spike_ctx.spike_strength <= 1.75)
+    setup_quality = (
+        (sr_pts >= 8.0)
+        or (bb_pts >= 8.0)
+        or (sq_pts >= 6.0)
+        or (stoch_enabled and (
+            (side == "BUY" and stoch_k <= 35)
+            or (side == "SELL" and stoch_k >= 65)
+        ))
+    )
+    price_action_ok = hard_confirmation or early_pressure_ok
+
     high_vol = _is_high_vol(regime, vol_note)
     if high_vol:
-        score -= 10.0
-        reasons.append("High-volatility caution: needs price-action confirmation")
-        if require_price_action_confirmation_in_high_vol and not hard_confirmation:
+        score -= 8.0
+        reasons.append("High-volatility caution: smaller size / wait for cleaner retest")
+        # In high volatility, require an actual wick/micro-break or very early pressure.
+        if require_price_action_confirmation_in_high_vol and not hard_confirmation and not early_pressure_ok:
             if target_spike_candidate:
-                logger.info("%s rejected %s trigger: high-volatility regime without hard confirmation", symbol, side)
+                logger.info("%s rejected %s trigger: high-volatility regime without usable confirmation", symbol, side)
             return None
 
-    if conflict and allow_counter_regime_reversal:
-        hard_reversal_allowed = spike_ok and hard_confirmation and spike_ctx.spike_strength >= max(1.2, trigger_spike_strength)
-        if not hard_reversal_allowed:
-            if target_spike_candidate:
-                logger.info("%s rejected %s trigger: counter-regime reversal not strong enough | regime=%s", symbol, side, regime)
-            return None
+    if require_micro_break_for_trigger and not hard_confirmation:
+        # Backward compatible with Railway variable, but log correctly.
+        if target_spike_candidate:
+            logger.info(
+                "%s rejected %s trigger: hard confirmation required | raw=%.1f spike_ok=%s regime=%s",
+                symbol, side, score, spike_ok, regime,
+            )
+        return None
 
     entry_low, entry_high, stop_loss, tp1, tp2, rr = _build_levels(
         side,
@@ -559,36 +623,37 @@ def evaluate_signal(
             logger.info("%s rejected %s trigger: R:R %.2f below minimum %.2f", symbol, side, rr, min_risk_reward)
         return None
 
-    # Score caps make the bot more honest. A signal can be good without being 100/100.
+    # Score honesty: cap overconfident setups but avoid suppressing all valid early entries.
     raw_score = score
     if not hard_confirmation:
         score = min(score, float(score_cap_no_hard_confirmation))
     if high_vol:
         score = min(score, float(score_cap_high_volatility))
-    # BPR is context-only in this build. If no explicit BPR context exists, cap confidence slightly.
     score = min(score, float(score_cap_without_bpr))
     score = float(max(0.0, min(100.0, score)))
 
     trigger_confirmed = (
         trigger_alerts_enabled
         and score >= trigger_min
-        and spike_ok
-        and (hard_confirmation or not require_micro_break_for_trigger)
+        and setup_quality
+        and price_action_ok
     )
 
     if trigger_confirmed:
         stage: AlertStage = "TRIGGER"
-    elif preparation_alerts_enabled and score >= float(min_score):
+    elif preparation_alerts_enabled and score >= float(min_score) and setup_quality:
         stage = "PREP"
     else:
-        if target_spike_candidate:
+        if target_spike_candidate or raw_score >= trigger_min - 8:
             logger.info(
-                "%s rejected %s trigger: score %.1f below trigger minimum %.1f or confirmation incomplete | raw=%.1f spike_ok=%s hard_confirmation=%s regime=%s stoch=%.1f/%.1f",
+                "%s rejected %s trigger: score %.1f below trigger minimum %.1f or setup/confirmation incomplete | raw=%.1f setup=%s price_action=%s spike_ok=%s hard_confirmation=%s regime=%s stoch=%.1f/%.1f",
                 symbol,
                 side,
                 score,
                 trigger_min,
                 raw_score,
+                setup_quality,
+                price_action_ok,
                 spike_ok,
                 hard_confirmation,
                 regime,
@@ -598,18 +663,31 @@ def evaluate_signal(
         return None
 
     entry_rule, entry_validity = _entry_text(side, entry_low, entry_high, stop_loss)
-    confirmation_summary = "Micro-break confirmed" if micro_ok else ("Rejection confirmed" if rejection_ok else "Waiting for confirmation")
+    if rejection_ok and micro_ok:
+        confirmation_summary = "rejection + micro-break"
+    elif rejection_ok:
+        confirmation_summary = "rejection"
+    elif micro_ok:
+        confirmation_summary = "micro-break"
+    elif early_pressure_ok:
+        confirmation_summary = "early spike pressure"
+    else:
+        confirmation_summary = "setup confirmation"
 
     cleaned: list[str] = []
     seen: set[str] = set()
-    for reason in reasons:
+    priority = [
+        confirmation_summary,
+        "Sniper pullback setup",
+    ]
+    for reason in priority + reasons:
         if not reason or reason in seen:
             continue
         cleaned.append(reason)
         seen.add(reason)
 
     logger.info(
-        "%s accepted %s %s | score=%.1f trigger_min=%.1f regime=%s spike_dir=%s strength=%.2f vel=%.6f rr=%.2f",
+        "%s accepted %s %s | score=%.1f trigger_min=%.1f regime=%s spike_dir=%s strength=%.2f vel=%.6f rr=%.2f setup=%s confirm=%s",
         symbol,
         side,
         stage,
@@ -620,20 +698,22 @@ def evaluate_signal(
         spike_ctx.spike_strength,
         spike_ctx.tick_velocity,
         rr,
+        setup_quality,
+        confirmation_summary,
     )
 
     return Signal(
         symbol=symbol,
         side=side,
         score=score,
-        timeframe="1m setup with 5m/15m context",
+        timeframe="1m sniper pullback with 5m/15m context",
         entry_zone_low=entry_low,
         entry_zone_high=entry_high,
         stop_loss=stop_loss,
         take_profit_1=tp1,
         take_profit_2=tp2,
         risk_reward=rr,
-        reasons=cleaned[:6],
+        reasons=cleaned[:5],
         volatility_warning=vol_note,
         regime=regime,
         timestamp_epoch=float(now_epoch),
@@ -643,6 +723,7 @@ def evaluate_signal(
         confirmation_summary=confirmation_summary,
         bpr_context={"status": "NO_DATA", "note": "H4 BPR not available in this build"},
         features={
+            "strategy_version": "sniper_pullback_v2",
             "regime": regime,
             "rsi": rsi,
             "stoch_k": stoch_k,
@@ -653,7 +734,12 @@ def evaluate_signal(
             "micro_break_ok": micro_ok,
             "rejection_ok": rejection_ok,
             "hard_confirmation": hard_confirmation,
+            "early_pressure_ok": early_pressure_ok,
+            "setup_quality": setup_quality,
+            "anti_chase_body_atr": body_atr,
+            "anti_chase_extension_atr": extension_atr,
             "score_raw": raw_score,
             "score_capped": score,
         },
     )
+

@@ -80,6 +80,12 @@ class Settings:
     trigger_tick_velocity_min: float
     require_micro_break_for_trigger: bool
     micro_break_lookback: int
+    require_wick_or_micro_for_trigger: bool
+    allow_drift_only_confirmation: bool
+    min_trigger_score_without_micro_break: float
+    min_trigger_score_without_wick: float
+    max_trigger_stoch_buy: float
+    min_trigger_stoch_sell: float
 
     entry_zone_atr_multiplier: float
     stop_loss_atr_multiplier: float
@@ -175,12 +181,18 @@ def get_settings() -> Settings:
             deriv_real_trading_confirm=confirm,
             preparation_alerts_enabled=_bool_env("PREPARATION_ALERTS_ENABLED", False),
             trigger_alerts_enabled=_bool_env("TRIGGER_ALERTS_ENABLED", True),
-            trigger_min_signal_score=_float_env("TRIGGER_MIN_SIGNAL_SCORE", 76.0),
-            trigger_spike_strength=_float_env("TRIGGER_SPIKE_STRENGTH", 0.55),
-            trigger_tick_velocity_min=_float_env("TRIGGER_TICK_VELOCITY_MIN", 0.004),
+            trigger_min_signal_score=_float_env("TRIGGER_MIN_SIGNAL_SCORE", 74.0),
+            trigger_spike_strength=_float_env("TRIGGER_SPIKE_STRENGTH", 0.80),
+            trigger_tick_velocity_min=_float_env("TRIGGER_TICK_VELOCITY_MIN", 0.008),
             require_micro_break_for_trigger=_bool_env("REQUIRE_MICRO_BREAK_FOR_TRIGGER", False),
             micro_break_lookback=max(2, _int_env("MICRO_BREAK_LOOKBACK", 3)),
-            entry_zone_atr_multiplier=max(0.01, _float_env("ENTRY_ZONE_ATR_MULTIPLIER", 0.10)),
+            require_wick_or_micro_for_trigger=_bool_env("REQUIRE_WICK_OR_MICRO_FOR_TRIGGER", True),
+            allow_drift_only_confirmation=_bool_env("ALLOW_DRIFT_ONLY_CONFIRMATION", False),
+            min_trigger_score_without_micro_break=_float_env("MIN_TRIGGER_SCORE_WITHOUT_MICRO_BREAK", 78.0),
+            min_trigger_score_without_wick=_float_env("MIN_TRIGGER_SCORE_WITHOUT_WICK", 76.0),
+            max_trigger_stoch_buy=_float_env("MAX_TRIGGER_STOCH_BUY", 72.0),
+            min_trigger_stoch_sell=_float_env("MIN_TRIGGER_STOCH_SELL", 28.0),
+            entry_zone_atr_multiplier=max(0.01, _float_env("ENTRY_ZONE_ATR_MULTIPLIER", 0.08)),
             stop_loss_atr_multiplier=max(0.5, _float_env("STOP_LOSS_ATR_MULTIPLIER", 3.0)),
             take_profit_1_atr_multiplier=max(0.5, _float_env("TAKE_PROFIT_1_ATR_MULTIPLIER", 4.5)),
             take_profit_2_atr_multiplier=max(0.5, _float_env("TAKE_PROFIT_2_ATR_MULTIPLIER", 7.5)),
@@ -211,8 +223,8 @@ def get_settings() -> Settings:
             ict_bpr_score_bonus=max(0.0, _float_env("ICT_BPR_SCORE_BONUS", 5.0)),
             ict_bpr_require_for_trigger=_bool_env("ICT_BPR_REQUIRE_FOR_TRIGGER", False),
             ict_bpr_max_distance_atr=max(0.1, _float_env("ICT_BPR_MAX_DISTANCE_ATR", 2.0)),
-            max_signals_per_symbol_per_hour=max(1, _int_env("MAX_SIGNALS_PER_SYMBOL_PER_HOUR", 4)),
-            min_minutes_between_signals_same_symbol=max(0, _int_env("MIN_MINUTES_BETWEEN_SIGNALS_SAME_SYMBOL", 10)),
+            max_signals_per_symbol_per_hour=max(1, _int_env("MAX_SIGNALS_PER_SYMBOL_PER_HOUR", 1)),
+            min_minutes_between_signals_same_symbol=max(0, _int_env("MIN_MINUTES_BETWEEN_SIGNALS_SAME_SYMBOL", 20)),
             max_spread_points_estimate=_float_env("MAX_SPREAD_POINTS_ESTIMATE", 15.0),
             estimated_spread_points=_float_env("ESTIMATED_SPREAD_POINTS", 4.0),
             extreme_atr_ratio_threshold=_float_env("EXTREME_ATR_RATIO_THRESHOLD", 3.2),

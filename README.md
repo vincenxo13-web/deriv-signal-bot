@@ -223,28 +223,31 @@ Interpretation:
 - For Crash, do not blindly enter as price rises. Wait for rejection back below the zone.
 - TP1/TP2 are the planned signal targets. Holding beyond them becomes a manual runner.
 
+## Stricter loss-control strategy update
 
-## Sniper Pullback Strategy v2
+This build tightens the Sniper Pullback Strategy after live outcome logs showed too many losses from weak early-pressure entries.
 
-This build replaces the late-confirmation trigger model with a pullback/rejection model:
+Main behavior:
 
-- Boom = BUY only, Crash = SELL only.
-- The bot looks for pullback zones first, then checks for rejection, early spike pressure, or a small micro-break.
-- Target-direction spike pressure supports the signal, but the bot tries not to wait until the whole spike/drop has already moved.
-- Anti-chase logic rejects candles that have already travelled too far from the setup zone.
-- Stochastic is used as a scoring/context factor by default, not a hard blocker.
-- Telegram alerts are compact so the entry, SL, TP, confirmation, and regime are easy to read.
+- Early spike pressure can support the score, but it cannot be the only trigger.
+- A trigger now needs a real micro-break or rejection wick by default.
+- Drift/exhaustion is allowed only as supporting context, not as a standalone trigger.
+- Boom BUY is blocked when stochastic is already too hot.
+- Crash SELL is blocked when stochastic is already too exhausted.
+- High-volatility regimes still require stronger confirmation.
+- Per-symbol signal frequency is reduced to avoid repeated entries in the same bad condition.
 
-Recommended Railway variables for this strategy:
+Recommended Railway variables:
 
 ```env
 SYMBOLS=BOOM300N,BOOM500,CRASH300N,CRASH500
+WARM_START_CANDLE_LIMIT=12000
 
 PREPARATION_ALERTS_ENABLED=false
 TRIGGER_ALERTS_ENABLED=true
-TRIGGER_MIN_SIGNAL_SCORE=76
-TRIGGER_SPIKE_STRENGTH=0.55
-TRIGGER_TICK_VELOCITY_MIN=0.004
+TRIGGER_MIN_SIGNAL_SCORE=74
+TRIGGER_SPIKE_STRENGTH=0.80
+TRIGGER_TICK_VELOCITY_MIN=0.008
 
 REQUIRE_TREND_ALIGNMENT=false
 REQUIRE_REGIME_ALIGNMENT=true
@@ -253,15 +256,21 @@ STOCH_ENABLED=true
 REQUIRE_STOCH_FOR_TRIGGER=false
 REQUIRE_MICRO_BREAK_FOR_TRIGGER=false
 
+REQUIRE_WICK_OR_MICRO_FOR_TRIGGER=true
+ALLOW_DRIFT_ONLY_CONFIRMATION=false
+MIN_TRIGGER_SCORE_WITHOUT_MICRO_BREAK=78
+MIN_TRIGGER_SCORE_WITHOUT_WICK=76
+MAX_TRIGGER_STOCH_BUY=72
+MIN_TRIGGER_STOCH_SELL=28
+
 ENTRY_ZONE_ATR_MULTIPLIER=0.10
 STOP_LOSS_ATR_MULTIPLIER=3.0
 TAKE_PROFIT_1_ATR_MULTIPLIER=4.5
 TAKE_PROFIT_2_ATR_MULTIPLIER=7.5
 MIN_RISK_REWARD=1.0
 
-SCORE_CAP_WITHOUT_BPR=92
-SCORE_CAP_HIGH_VOLATILITY=86
-SCORE_CAP_NO_HARD_CONFIRMATION=78
+MAX_SIGNALS_PER_SYMBOL_PER_HOUR=1
+MIN_MINUTES_BETWEEN_SIGNALS_SAME_SYMBOL=20
 ```
 
-Signals are still research alerts, not financial advice. Watch the next 50-100 resolved triggers before trusting the new model.
+If signals become too rare, lower `TRIGGER_MIN_SIGNAL_SCORE` slowly from `74` to `72`. Do not turn on drift-only confirmation unless you are deliberately testing a noisier mode.
